@@ -30,18 +30,18 @@ public class LocalizerTwoWheel {
         CurrentPosition = pose;
     }
     public void update(){
-        double deltaHeading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES)-lastHeading;
+        double deltaHeading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS)-lastHeading;
         double Xd = (lastX-(xEncoder.getCurrentPosition()*InPerTick))-(xOffset*deltaHeading);
         double Yd = (lastY-(yEncoder.getCurrentPosition()*InPerTick))-(yOffset*deltaHeading);
 
         double deltaX = Xd * Math.cos(imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS)) - Yd * Math.sin(imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS));
         double deltaY = Xd * Math.cos(imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS)) + Yd * Math.sin(imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS));
 
-        lastHeading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES);
+        lastHeading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
         lastX = xEncoder.getCurrentPosition()*InPerTick;
         lastY = yEncoder.getCurrentPosition()*InPerTick;
 
-        CurrentPosition.degree = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES);
+        CurrentPosition.degree = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
         CurrentPosition.x += deltaX;
         CurrentPosition.y += deltaY;
     }
