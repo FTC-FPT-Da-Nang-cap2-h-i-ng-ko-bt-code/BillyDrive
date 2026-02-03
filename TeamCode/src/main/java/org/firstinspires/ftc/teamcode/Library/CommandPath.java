@@ -7,11 +7,11 @@ import com.qualcomm.robotcore.hardware.HardwareMap;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
 public class CommandPath {
-    boolean active = false;
     private LocalizerTwoWheel localizerTwoWheel;
     private Kinematics kinematics;
     PIDController xController, yController, headingController;
-    public CommandPath(HardwareMap hardwareMap, DcMotorEx leftFront, DcMotorEx leftBack, DcMotorEx rightFront, DcMotorEx rightBack){
+    public CommandPath(HardwareMap hardwareMap, DcMotorEx leftFront, DcMotorEx leftBack, DcMotorEx rightFront, DcMotorEx rightBack,
+                       PIDController xController, PIDController yController, PIDController heading){
         localizerTwoWheel = new LocalizerTwoWheel(hardwareMap, "xEncoder", "yEncoder", new Pose2D(0, 0, 0));
         kinematics = new Kinematics(leftFront, leftBack, rightFront, rightBack);
         xController = new PIDController(0, 0, 0, 0);
@@ -19,7 +19,7 @@ public class CommandPath {
         headingController = new PIDController(0, 0, 0, 0);
     }
     public void moveToPoint(Pose2D newPose){
-        while (active){
+        while (true){
             Pose2D currentPose = localizerTwoWheel.CurrentPosition;
 
             double dX = newPose.x - currentPose.x;
