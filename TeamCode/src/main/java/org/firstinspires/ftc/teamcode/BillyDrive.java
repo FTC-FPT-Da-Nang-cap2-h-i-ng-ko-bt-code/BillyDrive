@@ -196,8 +196,8 @@ class PID {
         lastX = robotX;
         lastY = robotY;
 
-        double forward = kP*robotX + kD*dX + kV*ex;
-        double strafe  = kP*robotY + kD*dY + kV*ey;
+        double forward = kP*robotX + kD*dX + kV*robotX;
+        double strafe  = kP*robotY + kD*dY + kV*robotY;
         double turn    = kP_heading*eh;
         forward = Math.max(-1, Math.min(1, forward));
         strafe  = Math.max(-1, Math.min(1, strafe));
@@ -476,12 +476,19 @@ class AutoTuner {
         return sum/count;
     }
     public double tuneTrackWidth() throws InterruptedException {
+        double startLeft = drive.LeftFront.getCurrentPosition();
+        double startRight = drive.RightFront.getCurrentPosition();
         double startHeading = locator.heading;
         drive.drive(0,0,1);
-        Thread.sleep(2000);
+        Thread.sleep(3000);
         drive.drive(0,0,0);
-        double deltaHeading = locator.heading - startHeading;
-        return deltaHeading;
+        double endLeft = drive.LeftFront.getCurrentPosition();
+        double endRight = drive.RightFront.getCurrentPosition();
+        double endHeading = locator.heading;
+        double leftDist = (endLeft - startLeft) * locator.TICKS_TO_CM;
+        double rightDist = (endRight - startRight) * locator.TICKS_TO_CM;
+        double deltaHeading = endHeading - startHeading;
+        return (rightDist - leftDist) / deltaHeading;
     }
 }
 @TeleOp(name = "TuningBillyDrive", group = "BillyDrive")
@@ -516,10 +523,8 @@ class TuningBillyDrive extends LinearOpMode{
                     telemetry.addLine("Press UP to start tuning");
                     telemetry.update();
                     waitForUp();
-                    if(gamepad1.dpad_up){
-                        sleep(500);
-                        state = TuneState.MAX_VEL;
-                    }
+                    sleep(500);
+                    state = TuneState.MAX_VEL;
                     break;
                 case MAX_VEL:
                     telemetry.addLine("Press UP to start tuning");
