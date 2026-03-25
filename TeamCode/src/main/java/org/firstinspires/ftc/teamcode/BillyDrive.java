@@ -22,13 +22,16 @@ public class BillyDrive {
     IMU imu;
     BillyDrive(HardwareMap hardwareMap){
         this.hardwareMap = hardwareMap;
-        LeftFront = hardwareMap.get(DcMotor.class, "m1");
-        LeftBack = hardwareMap.get(DcMotor.class, "m2");
-        RightFront = hardwareMap.get(DcMotor.class, "m3");
-        RightBack = hardwareMap.get(DcMotor.class, "m4");
+        LeftFront = hardwareMap.get(DcMotor.class, "m0");
+        LeftBack = hardwareMap.get(DcMotor.class, "m1");
+        RightFront = hardwareMap.get(DcMotor.class, "m2");
+        RightBack = hardwareMap.get(DcMotor.class, "m3");
 
+//        LeftFront.setDirection(DcMotorSimple.Direction.REVERSE);
+//        LeftBack.setDirection(DcMotorSimple.Direction.REVERSE);
         RightFront.setDirection(DcMotorSimple.Direction.REVERSE);
         RightBack.setDirection(DcMotorSimple.Direction.REVERSE);
+
 
         LeftFront.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
         LeftBack.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
@@ -91,10 +94,10 @@ public class BillyDrive {
     }
     public void drive(double forward, double strafe, double turn){
 
-        double fl = forward + strafe + turn;
-        double fr = forward - strafe - turn;
-        double bl = forward - strafe + turn;
-        double br = forward + strafe - turn;
+        double fl = forward - strafe - turn;
+        double fr = forward - strafe + turn;
+        double bl = forward + strafe - turn;
+        double br = forward + strafe + turn;
 
         double max = Math.max(
                 Math.max(Math.abs(fl), Math.abs(fr)),
@@ -132,9 +135,15 @@ class Locator {
     public double x = 0;
     public double y = 0;
     public double heading = 0;
-    double lastForward = 57.1;
-    double lastStrafe = 57.1;
+
+    double lastForward = 0;
+    double lastStrafe = 0;
+    double lastHeading = 0;
+
     double TICKS_TO_CM = 0.0607327506044263;
+    double forwardOffset = 8.89;
+    double strafeOffset = 6.35;
+
     public void update(double forwardEncoder,
                        double strafeEncoder,
                        double imuHeading){
@@ -142,13 +151,20 @@ class Locator {
         double dForward = (forwardEncoder - lastForward) * TICKS_TO_CM;
         double dStrafe = (strafeEncoder - lastStrafe) * TICKS_TO_CM;
 
+        double dHeading = imuHeading - lastHeading;
+
         lastForward = forwardEncoder;
         lastStrafe = strafeEncoder;
+        lastHeading = imuHeading;
 
         heading = imuHeading;
 
-        double dx = dForward*Math.cos(heading) - dStrafe*Math.sin(heading);
-        double dy = dForward*Math.sin(heading) + dStrafe*Math.cos(heading);
+        // trừ phần dịch chuyển do quay
+        dForward -= dHeading * forwardOffset;
+        dStrafe  -= dHeading * strafeOffset;
+
+        double dx = dForward * Math.cos(heading) - dStrafe * Math.sin(heading);
+        double dy = dForward * Math.sin(heading) + dStrafe * Math.cos(heading);
 
         x += dx;
         y += dy;
