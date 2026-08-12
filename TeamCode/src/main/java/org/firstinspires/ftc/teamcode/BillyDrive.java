@@ -4,6 +4,7 @@ import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.IMU;
+import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
@@ -18,6 +19,11 @@ public class BillyDrive extends LinearOpMode {
     double TargetX = 0, TargetY = 0;
 
     double kp = 0, ki = 0, kd = 0;
+    double integralX = 0, integralY = 0;
+    double lastErrorX = 0, lastErrorY = 0;
+
+    ElapsedTime time = new ElapsedTime();
+    double lasttime = 0;
 
     @Override
     public void runOpMode() throws InterruptedException {
@@ -37,10 +43,12 @@ public class BillyDrive extends LinearOpMode {
                 )
         ));
         imu.resetYaw();
+        time.startTime();
+        time.reset();
         waitForStart();
-
         while (opModeIsActive()){
             updateLocation();
+            updateRunning();
             telemetry.addData("x", x);
             telemetry.addData("y", y);
             telemetry.update();
@@ -53,10 +61,11 @@ public class BillyDrive extends LinearOpMode {
         double dy = (vy - lastY) * MMperTick;
         lastX = vx;
         lastY = vy;
+
         double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
 
-        x += dx * Math.cos(yaw) + dy * Math.sin(yaw);
-        y += dx * Math.sin(yaw) - dy * Math.cos(yaw);
+        y += dx * Math.cos(yaw) - dy * Math.sin(yaw);
+        x += dx * Math.sin(yaw) + dy * Math.cos(yaw);
     }
 
     void GoTo(double x, double y){
@@ -64,17 +73,49 @@ public class BillyDrive extends LinearOpMode {
         TargetY = y;
     }
 
-    void updateRunning(){
-        double dx = TargetX - x;
-        double dy = TargetY - y;
-        double errorX = dx * kp;
-        double errorY = dy * kp;
+    void updateRunning() {
+        double errorX = TargetX - x;
+        double errorY = TargetY - y;
+        double dt = time.seconds() - lasttime;
+        lasttime = time.seconds();
+
+        double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+
+        double robotX = errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
+        double robotY = errorX * Math.cos(yaw) - errorY * Math.sin(yaw);
+
+        double derivativeX = (robotX - lastErrorX) / dt;
+        double derivativeY = (robotY - lastErrorY) / dt;
+
+        lastErrorX = robotX;
+        lastErrorY = robotY;
+
+        double powerX = robotX * kp + ki * integralX + kd * derivativeX;
+        double powerY = robotY * kp + ki * integralY + kd * derivativeY;
+
+        integralX += robotX * dt;
+        integralY += robotY * dt;
+
+        drivePower(powerX, powerY);
     }
 
-    void drivePower(double x, double y){
-        leftfront.setPower(x + y);
-        rightfront.setPower(x - y);
-        leftback.setPower(x + y);
-        rightback.setPower(x - y);
+    void drivePower(double x, double y) {
+        double lf = y + x;
+        double rf = y - x;
+        double lb = y - x;
+        double rb = y + x;
+
+        double max = Math.max(1.0, Math.max(Math.max(Math.abs(lf), Math.abs(rf)), Math.max(Math.abs(lb), Math.abs(rb))));
+
+        leftfront.setPower(lf / max);
+        rightfront.setPower(rf / max);
+        leftback.setPower(lb / max);
+        rightback.setPower(rb / max);
+    }
+
+    void MotorTest(){
+        double x = gamepad1.left_stick_x;
+        double y = gamepad1.left_stick_y;
+        drivePower(x, y);
     }
 }
