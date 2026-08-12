@@ -67,6 +67,14 @@ public class BillyDrive extends LinearOpMode {
     void updateRunning(){
         double dx = TargetX - x;
         double dy = TargetY - y;
+        double errorX = dx * kp;
+        double errorY = dy * kp;
+    }
 
+    void drivePower(double x, double y){
+        leftfront.setPower(x + y);
+        rightfront.setPower(x - y);
+        leftback.setPower(x + y);
+        rightback.setPower(x - y);
     }
 }
