@@ -17,14 +17,9 @@ public class BillyDrive extends LinearOpMode {
     double MMperTick = 0;
     double lastX = 0, lastY = 0;
     double TargetX = 0, TargetY = 0;
-
     double kp = 0, ki = 0, kd = 0;
-    double integralX = 0, integralY = 0;
-    double lastErrorX = 0, lastErrorY = 0;
-
-    ElapsedTime time = new ElapsedTime();
-    double lasttime = 0;
-
+    PID pid = new PID(kp, ki, kd);
+    ElapsedTime runtime = new ElapsedTime();
     String mode = "Motortest"; // We have: MotorTest | Running
 
     @Override
@@ -45,8 +40,7 @@ public class BillyDrive extends LinearOpMode {
                 )
         ));
         imu.resetYaw();
-        time.startTime();
-        time.reset();
+        runtime.reset();
         waitForStart();
         while (opModeIsActive()){
             if(mode == "Running"){
@@ -82,27 +76,30 @@ public class BillyDrive extends LinearOpMode {
     void updateRunning() {
         double errorX = TargetX - x;
         double errorY = TargetY - y;
-        double dt = time.seconds() - lasttime;
-        lasttime = time.seconds();
-
         double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
 
-        double robotX = errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
-        double robotY = errorX * Math.cos(yaw) - errorY * Math.sin(yaw);
+//        double robotX = errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
+//        double robotY = errorX * Math.cos(yaw) - errorY * Math.sin(yaw);
+//
+//        double derivativeX = (robotX - lastErrorX) / dt;
+//        double derivativeY = (robotY - lastErrorY) / dt;
+//
+//        lastErrorX = robotX;
+//        lastErrorY = robotY;
+//
+//        double powerX = robotX * kp + ki * integralX + kd * derivativeX;
+//        double powerY = robotY * kp + ki * integralY + kd * derivativeY;
+//
+//        integralX += robotX * dt;
+//        integralY += robotY * dt;
+//
+//        drivePower(powerX, powerY);
 
-        double derivativeX = (robotX - lastErrorX) / dt;
-        double derivativeY = (robotY - lastErrorY) / dt;
+        double error = Math.hypot(errorX, errorY);
+        double angle = Math.atan2(errorY, errorX);
 
-        lastErrorX = robotX;
-        lastErrorY = robotY;
-
-        double powerX = robotX * kp + ki * integralX + kd * derivativeX;
-        double powerY = robotY * kp + ki * integralY + kd * derivativeY;
-
-        integralX += robotX * dt;
-        integralY += robotY * dt;
-
-        drivePower(powerX, powerY);
+        double power = pid.update(error, runtime.seconds());
+        runtime.reset();
     }
 
     void drivePower(double x, double y) {
@@ -123,5 +120,27 @@ public class BillyDrive extends LinearOpMode {
         double x = gamepad1.left_stick_x;
         double y = gamepad1.left_stick_y;
         drivePower(x, y);
+    }
+}
+
+class PID {
+    double kP, kI, kD;
+
+    double integral = 0;
+    double lastError = 0;
+
+    PID(double kP, double kI, double kD) {
+        this.kP = kP;
+        this.kI = kI;
+        this.kD = kD;
+    }
+
+    double update(double error, double dt) {
+        integral += error * dt;
+
+        double derivative = (error - lastError) / dt;
+        lastError = error;
+
+        return kP * error + kI * integral + kD * derivative;
     }
 }
