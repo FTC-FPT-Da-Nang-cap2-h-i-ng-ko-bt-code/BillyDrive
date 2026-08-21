@@ -1,3 +1,7 @@
+<div align="center">
+<a href="README.md">🇬🇧 English</a> |
+<a href="README_VI.md">🇻🇳 Tiếng Việt</a>
+</div>
 # JavaOnRobot Pathing
 
 A lightweight, highly customizable pathing system designed specifically for **JavaOnRobot**.
