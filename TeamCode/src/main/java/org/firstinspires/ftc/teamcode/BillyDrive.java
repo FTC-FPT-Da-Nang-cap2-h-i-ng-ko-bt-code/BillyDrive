@@ -25,6 +25,8 @@ public class BillyDrive extends LinearOpMode {
     ElapsedTime time = new ElapsedTime();
     double lasttime = 0;
 
+    String mode = "Motortest"; // We have: MotorTest | Running
+
     @Override
     public void runOpMode() throws InterruptedException {
         leftfront = hardwareMap.get(DcMotor.class, "");
@@ -47,8 +49,12 @@ public class BillyDrive extends LinearOpMode {
         time.reset();
         waitForStart();
         while (opModeIsActive()){
+            if(mode == "Running"){
+                updateRunning();
+            } else if(mode == "MotorTest"){
+                MotorTest();
+            }
             updateLocation();
-            updateRunning();
             telemetry.addData("x", x);
             telemetry.addData("y", y);
             telemetry.update();
