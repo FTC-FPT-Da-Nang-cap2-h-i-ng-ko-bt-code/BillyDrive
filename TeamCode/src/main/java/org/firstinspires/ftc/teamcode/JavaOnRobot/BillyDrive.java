@@ -51,12 +51,17 @@ public class BillyDrive extends LinearOpMode {
                 )
         ));
         imu.resetYaw();
+
+        lastHeading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+        lastX = vertical.getCurrentPosition();
+        lastY = horizontal.getCurrentPosition();
+
         runtime.reset();
         waitForStart();
         while (opModeIsActive()){
-            if(mode == "Running"){
+            if ("Running".equals(mode)) {
                 updateRunning();
-            } else if(mode == "MotorTest"){
+            } else if ("MotorTest".equals(mode)) {
                 MotorTest();
             }
             updateLocation();
@@ -70,12 +75,12 @@ public class BillyDrive extends LinearOpMode {
         double vy = horizontal.getCurrentPosition();
 
         double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+        double oldHeading = lastHeading;
         double deltaYaw = yaw - lastHeading;
 
         while (deltaYaw > Math.PI) deltaYaw -= 2 * Math.PI;
 
         while (deltaYaw < -Math.PI) deltaYaw += 2 * Math.PI;
-
         lastHeading = yaw;
 
         double dx = (vx - lastX) * MMperTick;
@@ -86,8 +91,10 @@ public class BillyDrive extends LinearOpMode {
         dx -= xEnOffset * deltaYaw;
         dy -= yEnOffset * deltaYaw;
 
-        y += dx * Math.cos(yaw) - dy * Math.sin(yaw);
-        x += dx * Math.sin(yaw) + dy * Math.cos(yaw);
+        double heading = oldHeading + deltaYaw / 2;
+
+        y += dx * Math.cos(heading) - dy * Math.sin(heading);
+        x += dx * Math.sin(heading) + dy * Math.cos(heading);
     }
 
     void GoTo(double x, double y){
@@ -177,6 +184,7 @@ class PID {
 
     double update(double error, double dt) {
         integral += error * dt;
+        integral = Math.max(-1000, Math.min(1000, integral));
 
         double derivative = (error - lastError) / dt;
         lastError = error;
