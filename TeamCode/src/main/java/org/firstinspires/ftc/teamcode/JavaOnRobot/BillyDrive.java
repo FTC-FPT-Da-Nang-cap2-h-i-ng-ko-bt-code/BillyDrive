@@ -19,14 +19,18 @@ public class BillyDrive extends LinearOpMode {
     DcMotor leftfront, rightfront, leftback, rightback;
     DcMotor horizontal, vertical;
     IMU imu;
-
+    /// LOCATION
     double x = 0, y = 0;
+    double lastHeading = 0;
     double MMperTick = 0;
+    double xEnOffset = 0, yEnOffset = 0;
+    /// PID VALUE
     double lastX = 0, lastY = 0;
     double TargetX = 0, TargetY = 0;
     double kp = 0, ki = 0, kd = 0;
     PID pid = new PID(kp, ki, kd);
     ElapsedTime runtime = new ElapsedTime();
+    /// MODE PROGRAMME
     String mode = "Motortest"; // We have: MotorTest | Running
 
     @Override
@@ -64,12 +68,23 @@ public class BillyDrive extends LinearOpMode {
     void updateLocation() {
         double vx = vertical.getCurrentPosition();
         double vy = horizontal.getCurrentPosition();
+
+        double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+        double deltaYaw = yaw - lastHeading;
+
+        while (deltaYaw > Math.PI) deltaYaw -= 2 * Math.PI;
+
+        while (deltaYaw < -Math.PI) deltaYaw += 2 * Math.PI;
+
+        lastHeading = yaw;
+
         double dx = (vx - lastX) * MMperTick;
         double dy = (vy - lastY) * MMperTick;
         lastX = vx;
         lastY = vy;
 
-        double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+        dx -= xEnOffset * deltaYaw;
+        dy -= yEnOffset * deltaYaw;
 
         y += dx * Math.cos(yaw) - dy * Math.sin(yaw);
         x += dx * Math.sin(yaw) + dy * Math.cos(yaw);
