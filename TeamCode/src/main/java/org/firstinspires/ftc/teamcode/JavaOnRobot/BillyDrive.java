@@ -87,7 +87,7 @@ public class BillyDrive extends LinearOpMode {
         double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
 
         double dt = runtime.seconds();
-        if (dt <= 0) dt = 0.00000001;
+        dt = Math.max(dt, 0.0001);
         runtime.reset();
 
 //        double robotX = errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
@@ -107,19 +107,18 @@ public class BillyDrive extends LinearOpMode {
 //
 //        drivePower(powerX, powerY);
 
-        double angle = Math.atan2(errorY, errorX);
-
         double robotX = errorX * Math.cos(yaw) + errorY * Math.sin(yaw);
         double robotY = -errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
 
         double distance = Math.hypot(robotX, robotY);
+        double power = pid.update(distance, dt);
 
-        if (distance > 0) {
+        power = Math.max(0, Math.min(1, power));
+
+        if(distance > 0.001){
             robotX /= distance;
             robotY /= distance;
         }
-
-        double power = pid.update(distance, dt);
 
         robotX *= power;
         robotY *= power;
@@ -167,10 +166,12 @@ class PID {
         double derivative = (error - lastError) / dt;
         lastError = error;
 
-        return kP * error + kI * integral + kD * derivative;
+        return kP * error
+                + kI * integral
+                + kD * derivative;
     }
 
-    void reset(){
+    void reset() {
         integral = 0;
         lastError = 0;
     }
