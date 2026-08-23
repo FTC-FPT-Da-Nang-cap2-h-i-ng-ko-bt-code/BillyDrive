@@ -76,6 +76,7 @@ public class BillyDrive extends LinearOpMode {
     }
 
     void GoTo(double x, double y){
+        pid.reset();
         TargetX = x;
         TargetY = y;
     }
@@ -84,6 +85,10 @@ public class BillyDrive extends LinearOpMode {
         double errorX = TargetX - x;
         double errorY = TargetY - y;
         double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+
+        double dt = runtime.seconds();
+        if (dt <= 0) dt = 0.00000001;
+        runtime.reset();
 
 //        double robotX = errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
 //        double robotY = errorX * Math.cos(yaw) - errorY * Math.sin(yaw);
@@ -102,11 +107,24 @@ public class BillyDrive extends LinearOpMode {
 //
 //        drivePower(powerX, powerY);
 
-        double error = Math.hypot(errorX, errorY);
         double angle = Math.atan2(errorY, errorX);
 
-        double power = pid.update(error, runtime.seconds());
-        runtime.reset();
+        double robotX = errorX * Math.cos(yaw) + errorY * Math.sin(yaw);
+        double robotY = -errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
+
+        double distance = Math.hypot(robotX, robotY);
+
+        if (distance > 0) {
+            robotX /= distance;
+            robotY /= distance;
+        }
+
+        double power = pid.update(distance, dt);
+
+        robotX *= power;
+        robotY *= power;
+
+        drivePower(robotX, robotY);
     }
 
     void drivePower(double x, double y) {
@@ -130,6 +148,7 @@ public class BillyDrive extends LinearOpMode {
     }
 }
 
+///  bộ PID
 class PID {
     double kP, kI, kD;
 
@@ -149,5 +168,10 @@ class PID {
         lastError = error;
 
         return kP * error + kI * integral + kD * derivative;
+    }
+
+    void reset(){
+        integral = 0;
+        lastError = 0;
     }
 }
