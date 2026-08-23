@@ -8,6 +8,13 @@ import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
+/// --- PID ---
+/// dt = delta time
+/// derivative = (err - lastErr) / dt
+/// integral = err * dt
+/// pow = kp*err + ki*integral + kd*derivative
+/// output = kp*err + ki∫err*dt + kd*(de/dt)
+
 public class BillyDrive extends LinearOpMode {
     DcMotor leftfront, rightfront, leftback, rightback;
     DcMotor horizontal, vertical;
