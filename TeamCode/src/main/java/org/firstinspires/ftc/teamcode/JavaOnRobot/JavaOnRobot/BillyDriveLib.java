@@ -1,21 +1,15 @@
-package org.firstinspires.ftc.teamcode.JavaOnRobot;
+package org.firstinspires.ftc.teamcode.JavaOnRobot.JavaOnRobot;
+
+import static org.firstinspires.ftc.robotcore.external.BlocksOpModeCompanion.hardwareMap;
 
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
-import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
-/// --- PID ---
-/// dt = delta time
-/// derivative = (err - lastErr) / dt
-/// integral = err * dt
-/// pow = kp*err + ki*integral + kd*derivative
-/// output = kp*err + ki∫err*dt + kd*(de/dt)
-
-public class BillyDrive extends LinearOpMode {
+public class BillyDriveLib {
     DcMotor leftfront, rightfront, leftback, rightback;
     DcMotor horizontal, vertical;
     IMU imu;
@@ -25,16 +19,13 @@ public class BillyDrive extends LinearOpMode {
     double MMperTick = 0;
     double xEnOffset = 0, yEnOffset = 0;
     /// PID VALUE
+    double safeRange = 10;
     double lastX = 0, lastY = 0;
     double TargetX = 0, TargetY = 0;
     double kp = 0, ki = 0, kd = 0;
     PID pid = new PID(kp, ki, kd);
     ElapsedTime runtime = new ElapsedTime();
-    /// MODE PROGRAMME
-    String mode = "Motortest"; // We have: MotorTest | Running
-
-    @Override
-    public void runOpMode() throws InterruptedException {
+    BillyDriveLib() {
         leftfront = hardwareMap.get(DcMotor.class, "");
         rightfront = hardwareMap.get(DcMotor.class, "");
         leftback = hardwareMap.get(DcMotor.class, "");
@@ -51,24 +42,14 @@ public class BillyDrive extends LinearOpMode {
                 )
         ));
         imu.resetYaw();
-
-        lastHeading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
-        lastX = vertical.getCurrentPosition();
-        lastY = horizontal.getCurrentPosition();
-
-        runtime.reset();
-        waitForStart();
-        while (opModeIsActive()){
-            if ("Running".equals(mode)) {
+    }
+    void Running(){
+        new Thread(){
+            public void run(){
+                updateLocation();
                 updateRunning();
-            } else if ("MotorTest".equals(mode)) {
-                MotorTest();
             }
-            updateLocation();
-            telemetry.addData("x", x);
-            telemetry.addData("y", y);
-            telemetry.update();
-        }
+        }.start();
     }
     void updateLocation() {
         double vx = vertical.getCurrentPosition();
@@ -96,8 +77,7 @@ public class BillyDrive extends LinearOpMode {
         y += dx * Math.cos(heading) - dy * Math.sin(heading);
         x += dx * Math.sin(heading) + dy * Math.cos(heading);
     }
-
-    void GoTo(double x, double y){
+    public void GoTo(double x, double y){
         pid.reset();
         TargetX = x;
         TargetY = y;
@@ -106,41 +86,28 @@ public class BillyDrive extends LinearOpMode {
     void updateRunning() {
         double errorX = TargetX - x;
         double errorY = TargetY - y;
-        double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+
+        double yaw = imu.getRobotYawPitchRollAngles()
+                .getYaw(AngleUnit.RADIANS);
 
         double dt = runtime.seconds();
-        dt = Math.max(dt, 0.0001);
         runtime.reset();
-
-//        double robotX = errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
-//        double robotY = errorX * Math.cos(yaw) - errorY * Math.sin(yaw);
-//
-//        double derivativeX = (robotX - lastErrorX) / dt;
-//        double derivativeY = (robotY - lastErrorY) / dt;
-//
-//        lastErrorX = robotX;
-//        lastErrorY = robotY;
-//
-//        double powerX = robotX * kp + ki * integralX + kd * derivativeX;
-//        double powerY = robotY * kp + ki * integralY + kd * derivativeY;
-//
-//        integralX += robotX * dt;
-//        integralY += robotY * dt;
-//
-//        drivePower(powerX, powerY);
+        dt = Math.max(dt, 0.001);
 
         double robotX = errorX * Math.cos(yaw) + errorY * Math.sin(yaw);
         double robotY = -errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
-
         double distance = Math.hypot(robotX, robotY);
-        double power = pid.update(distance, dt);
 
+        if (distance < safeRange) {
+            drivePower(0, 0);
+            return;
+        }
+
+        double power = pid.update(distance, dt);
         power = Math.max(0, Math.min(1, power));
 
-        if(distance > 0.001){
-            robotX /= distance;
-            robotY /= distance;
-        }
+        robotX /= distance;
+        robotY /= distance;
 
         robotX *= power;
         robotY *= power;
@@ -161,15 +128,8 @@ public class BillyDrive extends LinearOpMode {
         leftback.setPower(lb / max);
         rightback.setPower(rb / max);
     }
-
-    void MotorTest(){
-        double x = gamepad1.left_stick_x;
-        double y = gamepad1.left_stick_y;
-        drivePower(x, y);
-    }
 }
 
-///  bộ PID
 class PID {
     double kP, kI, kD;
 
