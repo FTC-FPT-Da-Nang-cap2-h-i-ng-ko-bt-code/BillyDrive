@@ -33,8 +33,11 @@ public class BillyDrive extends LinearOpMode {
     /// PID VALUE
     double safeRange = 10;
     double lastX = 0, lastY = 0;
-    double TargetX = 0, TargetY = 0;
+    double TargetX = 0, TargetY = 0, TargetHeading = 0;
     double kp = 0, ki = 0, kd = 0;
+    // PID cho xoay
+    double kp_turn = 0.5, ki_turn = 0, kd_turn = 0; // Cần tuning lại
+    PID turnPid = new PID(kp_turn, ki_turn, kd_turn);
     PID pid = new PID(kp, ki, kd);
     ElapsedTime runtime = new ElapsedTime();
     /// MODE PROGRAMME
@@ -108,6 +111,11 @@ public class BillyDrive extends LinearOpMode {
         pid.reset();
         TargetX = x;
         TargetY = y;
+    }
+
+    void TurnTo(double angleDegrees) {
+        turnPid.reset();
+        TargetHeading = Math.toRadians(angleDegrees);
     }
 
     void updateRunning() {
