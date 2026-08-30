@@ -1,4 +1,4 @@
-package org.firstinspires.ftc.teamcode;
+package org.firstinspires.ftc.teamcode.JavaOnRobot.TesingZone;
 
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
@@ -22,10 +22,10 @@ public class BillyDrive extends LinearOpMode {
     // Odometry conversion
     double MMperTick = 0;
 
-    // Old GoTo system
+    // GoTo system
     double TargetX = 0, TargetY = 0;
 
-    // Old PID system
+    // GoTo PID
     double kp = 0, ki = 0, kd = 0;
     PID pid = new PID(kp, ki, kd);
     ElapsedTime runtime = new ElapsedTime();
@@ -66,7 +66,13 @@ public class BillyDrive extends LinearOpMode {
 
         waitForStart();
 
-        /*
+
+        // Example straight movement
+        GoTo(1000, 500);
+
+
+
+        //Example curve movement
         BezierCurve testPath = new BezierCurve(
                 new Point(0, 0),
                 new Point(500, 800),
@@ -74,15 +80,15 @@ public class BillyDrive extends LinearOpMode {
         );
 
         followPath(testPath);
-        */
 
-        while (opModeIsActive()) {
+
+        while (opModeIsActive()){
 
             updateLocation();
 
-            if (mode.equals("Running")) {
+            if(mode.equals("GoTo")|| mode.equals("Bezier")){
                 updateRunning();
-            } else if (mode.equals("MotorTest")) {
+            }else if (mode.equals("MotorTest")){
                 MotorTest();
             }
 
@@ -111,9 +117,29 @@ public class BillyDrive extends LinearOpMode {
         x += dx * Math.sin(yaw) + dy * Math.cos(yaw);
     }
 
+    // =========================================================
+    // GOTO
+    // =========================================================
+
+    void GoTo(double targetX, double targetY) {
+        TargetX = targetX;
+        TargetY = targetY;
+
+        pid.reset();
+        runtime.reset();
+
+        mode = "GoTo";
+    }
+
+
+
+    // =========================================================
+    // BEZIER PATH
+    // =========================================================
+
     void followPath(BezierCurve path) {
         currentPath = path;
-        mode = "Running";
+        mode = "Bezier";
     }
 
     double findClosestT(BezierCurve path) {
@@ -140,114 +166,137 @@ public class BillyDrive extends LinearOpMode {
 
         return bestT;
     }
-
-    void GoTo(double x, double y) {
-        TargetX = x;
-        TargetY = y;
-    }
-
+    // =========================================================
+    // UPDATE RUNNING
+    // =========================================================
     void updateRunning() {
 
-        // Old GoTo calculations
-        double errorX = TargetX - x;
-        double errorY = TargetY - y;
-        double error = Math.hypot(errorX, errorY);
-        double angle = Math.atan2(errorY, errorX);
+        // =========================
+        // GOTO
+        // =========================
 
-        /*
-        double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+        if (mode.equals("GoTo")) {
 
-        double robotX = errorX * Math.sin(yaw) + errorY * Math.cos(yaw);
-        double robotY = errorX * Math.cos(yaw) - errorY * Math.sin(yaw);
+            double errorX = TargetX - x;
+            double errorY = TargetY - y;
 
-        double derivativeX = (robotX - lastErrorX) / dt;
-        double derivativeY = (robotY - lastErrorY) / dt;
+            // Euclidean distance to target
+            double distance = Math.hypot(errorX, errorY);
 
-        lastErrorX = robotX;
-        lastErrorY = robotY;
+            if (distance <= endTolerance) {
+                drivePower(0, 0);
+                mode = "MotorTest";
+                return;
+            }
 
-        double powerX = robotX * kp + ki * integralX + kd * derivativeX;
-        double powerY = robotY * kp + ki * integralY + kd * derivativeY;
+            double dt = runtime.seconds();
+            runtime.reset();
 
-        integralX += robotX * dt;
-        integralY += robotY * dt;
+            // PID controls movement magnitude
+            double power = pid.update(distance, dt);
+            power = clamp(power, 0, 1);
 
-        drivePower(powerX, powerY);
+            // Normalize direction vector
+            double fieldX = errorX / distance * power;
+            double fieldY = errorY / distance * power;
 
-        double power = pid.update(error, runtime.seconds());
-        runtime.reset();
-        */
+            double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
 
-        if (currentPath == null) {
-            drivePower(0, 0);
-            return;
+            // Field coordinates -> Robot coordinates
+            double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
+            double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
+
+            drivePower(robotX, robotY);
+
+            telemetry.addData("Target X", TargetX);
+            telemetry.addData("Target Y", TargetY);
+            telemetry.addData("GoTo Error", distance);
+            telemetry.addData("GoTo Power", power);
         }
 
-        // Closest parameter on the Bezier curve
-        double t = findClosestT(currentPath);
+        // =========================
+        // BEZIER
+        // =========================
 
-        // Closest point on the path
-        Point closestPoint = currentPath.getPoint(t);
+        else if (mode.equals("Bezier")) {
 
-        // Tangent vector B'(t)
-        Point tangent = currentPath.getDerivative(t);
+            if (currentPath == null) {
+                drivePower(0, 0);
+                mode = "MotorTest";
+                return;
+            }
 
-        // Normalize tangent vector
-        double tangentLength = Math.hypot(tangent.x, tangent.y);
+            // Closest parameter on the Bezier curve
+            double t = findClosestT(currentPath);
 
-        if (tangentLength < 0.000001) {
-            drivePower(0, 0);
-            return;
+            // Closest point on the curve
+            Point closestPoint = currentPath.getPoint(t);
+
+            // Tangent vector B'(t)
+            Point tangent = currentPath.getDerivative(t);
+
+            double tangentLength = Math.hypot(tangent.x, tangent.y);
+
+            if (tangentLength < 0.000001) {
+                drivePower(0, 0);
+                return;
+            }
+
+            // Normalize tangent vector
+            double tangentX = tangent.x / tangentLength;
+            double tangentY = tangent.y / tangentLength;
+
+            // Cross-track correction vector
+            double correctionX = closestPoint.x - x;
+            double correctionY = closestPoint.y - y;
+            double correctionDistance = Math.hypot(correctionX, correctionY);
+
+            if (correctionDistance > 0.001) {
+                correctionX /= correctionDistance;
+                correctionY /= correctionDistance;
+            } else {
+                correctionX = 0;
+                correctionY = 0;
+            }
+
+            correctionX *= correctionPower;
+            correctionY *= correctionPower;
+
+            // Tangent vector + correction vector
+            double fieldX = tangentX * forwardPower + correctionX;
+            double fieldY = tangentY * forwardPower + correctionY;
+
+            double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+
+            // Field coordinates -> Robot coordinates
+            double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
+            double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
+
+            drivePower(robotX, robotY);
+
+            // Distance to endpoint
+            double endErrorX = currentPath.end.x - x;
+            double endErrorY = currentPath.end.y - y;
+            double endDistance = Math.hypot(endErrorX, endErrorY);
+
+            // Path completion
+            if (t >= 0.98 && endDistance <= endTolerance) {
+                drivePower(0, 0);
+                currentPath = null;
+                mode = "MotorTest";
+                return;
+            }
+
+            telemetry.addData("Path t", t);
+            telemetry.addData("Path Error", correctionDistance);
+            telemetry.addData("End Distance", endDistance);
+            telemetry.addData("Tangent X", tangentX);
+            telemetry.addData("Tangent Y", tangentY);
         }
+    }
 
-        double tangentX = tangent.x / tangentLength;
-        double tangentY = tangent.y / tangentLength;
-
-        // Cross-track correction vector
-        double correctionX = closestPoint.x - x;
-        double correctionY = closestPoint.y - y;
-        double correctionDistance = Math.hypot(correctionX, correctionY);
-
-        if (correctionDistance > 0.001) {
-            correctionX /= correctionDistance;
-            correctionY /= correctionDistance;
-        } else {
-            correctionX = 0;
-            correctionY = 0;
-        }
-
-        correctionX *= correctionPower;
-        correctionY *= correctionPower;
-
-        // Tangent vector + correction vector
-        double fieldX = tangentX * forwardPower + correctionX;
-        double fieldY = tangentY * forwardPower + correctionY;
-
-        double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
-
-        // Field coordinates -> Robot coordinates
-        double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
-        double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
-
-        drivePower(robotX, robotY);
-
-        // Distance to path endpoint
-        double endErrorX = currentPath.end.x - x;
-        double endErrorY = currentPath.end.y - y;
-        double endDistance = Math.hypot(endErrorX, endErrorY);
-
-        // Path completion condition
-        if (t >= 0.98 && endDistance <= endTolerance) {
-            drivePower(0, 0);
-            currentPath = null;
-            mode = "MotorTest";
-        }
-
-        telemetry.addData("Path t", t);
-        telemetry.addData("Path Error", correctionDistance);
-        telemetry.addData("End Distance", endDistance);
-        telemetry.addData("Tangent X", tangentX);
-        telemetry.addData("Tangent Y", tangentY);
+    double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     void drivePower(double x, double y) {
@@ -301,6 +350,11 @@ class PID {
         // PID formula
         return kP * error + kI * integral + kD * derivative;
     }
+
+    void reset() {
+        integral = 0;
+        lastError = 0;
+    }
 }
 
 
@@ -345,3 +399,4 @@ class BezierCurve {
         return new Point(dx, dy);
     }
 }
+
