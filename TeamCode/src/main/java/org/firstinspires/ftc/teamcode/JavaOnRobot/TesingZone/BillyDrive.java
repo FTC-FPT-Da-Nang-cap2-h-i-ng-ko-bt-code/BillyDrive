@@ -17,7 +17,8 @@ public class BillyDrive extends LinearOpMode {
     BezierCurve currentPath = null;
 
     double x = 0, y = 0;
-    double lastX = 0, lastY = 0;
+    double lastX = 0, lastY = 0, lastYaw = 0;
+    double verticalXOffset = 0, horizontalYOffset = 0;
 
     // Odometry conversion
     double MMperTick = 0;
@@ -110,11 +111,64 @@ public class BillyDrive extends LinearOpMode {
         lastX = vx;
         lastY = vy;
 
-        double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+        double yaw = imu.getRobotYawPitchRollAngles()
+                .getYaw(AngleUnit.RADIANS);
 
-        // Robot coordinates -> Field coordinates
-        y += dx * Math.cos(yaw) - dy * Math.sin(yaw);
-        x += dx * Math.sin(yaw) + dy * Math.cos(yaw);
+        // Góc robot vừa xoay
+        double dYaw = yaw - lastYaw;
+
+        // Normalize về [-PI, PI]
+        while (dYaw > Math.PI)
+            dYaw -= 2 * Math.PI;
+
+        while (dYaw < -Math.PI)
+            dYaw += 2 * Math.PI;
+
+        lastYaw = yaw;
+
+
+        // ==========================================
+        // BÙ SAI LỆCH DO ODO KHÔNG NẰM Ở TÂM
+        // ==========================================
+
+        // Vị trí của odo so với tâm robot
+        //
+        // verticalXOffset:
+        //      + nếu vertical odo nằm phía trước tâm
+        //      - nếu nằm phía sau
+        //
+        // horizontalYOffset:
+        //      + nếu horizontal odo nằm bên phải
+        //      - nếu nằm bên trái
+
+        double rotationDx =
+                -horizontalYOffset * (1 - Math.cos(dYaw))
+                        - verticalXOffset * Math.sin(dYaw);
+
+        double rotationDy =
+                verticalXOffset * (1 - Math.cos(dYaw))
+                        - horizontalYOffset * Math.sin(dYaw);
+
+
+        // Trừ chuyển động giả do robot xoay
+        dx -= rotationDx;
+        dy -= rotationDy;
+
+
+        // ==========================================
+        // ROBOT COORDINATES -> FIELD COORDINATES
+        // ==========================================
+
+        double fieldY =
+                dx * Math.cos(yaw)
+                        - dy * Math.sin(yaw);
+
+        double fieldX =
+                dx * Math.sin(yaw)
+                        + dy * Math.cos(yaw);
+
+        x += fieldX;
+        y += fieldY;
     }
 
     // =========================================================
