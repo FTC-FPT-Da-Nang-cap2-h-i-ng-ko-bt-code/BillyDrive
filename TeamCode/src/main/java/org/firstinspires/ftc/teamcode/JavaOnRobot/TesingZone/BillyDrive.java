@@ -38,10 +38,11 @@ public class BillyDrive extends LinearOpMode {
     double xEnOffset = 0, yEnOffset = 0;
     /// PID VALUE
     double safeRange = 10;
-    double lastX = 0, lastY = 0;
-    double TargetX = 0, TargetY = 0;
+    double TargetX = 0, TargetY = 0, TargetHeading;
     double kp = 0, ki = 0, kd = 0;
+    double turnkp = 0, turnki = 0, turnkd = 0;
     PID pid = new PID(kp, ki, kd);
+    PID turnPid = new PID(turnkp, turnki, turnkd);
     ElapsedTime runtime = new ElapsedTime();
 
     String mode = "MotorTest";
