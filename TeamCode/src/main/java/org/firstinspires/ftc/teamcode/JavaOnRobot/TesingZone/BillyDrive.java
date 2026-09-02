@@ -8,6 +8,19 @@ import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
+/// --- PID ---
+/// dt = delta time
+/// derivative = (err - lastErr) / dt
+/// integral = err * dt
+/// pow = kp*err + ki*integral + kd*derivative
+/// output = kp*err + ki∫err*dt + kd*(de/dt)
+
+/// Thứ tự thực hiện:
+///  - Điều chỉnh và test motor
+///  - Chỉnh Odometry
+///  - Tuning PID
+///  - Test path cơ bản
+
 public class BillyDrive extends LinearOpMode {
 
     DcMotor leftfront, rightfront, leftback, rightback;
@@ -22,11 +35,11 @@ public class BillyDrive extends LinearOpMode {
 
     // Odometry conversion
     double MMperTick = 0;
-
-    // GoTo system
+    double xEnOffset = 0, yEnOffset = 0;
+    /// PID VALUE
+    double safeRange = 10;
+    double lastX = 0, lastY = 0;
     double TargetX = 0, TargetY = 0;
-
-    // GoTo PID
     double kp = 0, ki = 0, kd = 0;
     PID pid = new PID(kp, ki, kd);
     ElapsedTime runtime = new ElapsedTime();
@@ -219,6 +232,10 @@ public class BillyDrive extends LinearOpMode {
         }
 
         return bestT;
+    }
+    void TurnTo(double angleDegrees) {
+        turnPid.reset();
+        TargetHeading = Math.toRadians(angleDegrees);
     }
     // =========================================================
     // UPDATE RUNNING
