@@ -37,20 +37,18 @@ public class BillyDrive extends LinearOpMode {
     double MMperTick = 0;
     double xEnOffset = 0, yEnOffset = 0;
     /// PID VALUE
-    double safeRange = 10;
-    double TargetX = 0, TargetY = 0, TargetHeading;
-    double kp = 0, ki = 0, kd = 0;
-    double turnkp = 0, turnki = 0, turnkd = 0;
-    PID pid = new PID(kp, ki, kd);
-    PID turnPid = new PID(turnkp, turnki, turnkd);
+    double TargetX = 0, TargetY = 0, TargetHeading = 0;
+
     ElapsedTime runtime = new ElapsedTime();
 
     String mode = "MotorTest";
 
     // Path follower constants
-    double forwardPower = 0.4;
-    double correctionPower = 0.2;
-    double endTolerance = 30.0;
+    double movePower = 0.6;
+    double slowPower = 0.2;
+    double endTolerance = 30;
+    double slowDistance = 200;
+    double pathPower = 0.5;
 
     @Override
     public void runOpMode() throws InterruptedException {
@@ -193,9 +191,6 @@ public class BillyDrive extends LinearOpMode {
         TargetX = targetX;
         TargetY = targetY;
 
-        pid.reset();
-        runtime.reset();
-
         mode = "GoTo";
     }
 
@@ -234,10 +229,10 @@ public class BillyDrive extends LinearOpMode {
 
         return bestT;
     }
-    void TurnTo(double angleDegrees) {
-        turnPid.reset();
-        TargetHeading = Math.toRadians(angleDegrees);
-    }
+//    void TurnTo(double angleDegrees) {
+//        turnPid.reset();
+//        TargetHeading = Math.toRadians(angleDegrees);
+//    }
     // =========================================================
     // UPDATE RUNNING
     // =========================================================
@@ -261,12 +256,13 @@ public class BillyDrive extends LinearOpMode {
                 return;
             }
 
-            double dt = runtime.seconds();
-            runtime.reset();
+            double power;
 
-            // PID controls movement magnitude
-            double power = pid.update(distance, dt);
-            power = clamp(power, 0, 1);
+            if (distance < slowDistance) {
+                power = slowPower;
+            } else {
+                power = movePower;
+            }
 
             // Normalize direction vector
             double fieldX = errorX / distance * power;
@@ -331,12 +327,9 @@ public class BillyDrive extends LinearOpMode {
                 correctionY = 0;
             }
 
-            correctionX *= correctionPower;
-            correctionY *= correctionPower;
-
             // Tangent vector + correction vector
-            double fieldX = tangentX * forwardPower + correctionX;
-            double fieldY = tangentY * forwardPower + correctionY;
+            double fieldX = tangentX * pathPower + correctionX;
+            double fieldY = tangentY * pathPower + correctionY;
 
             double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
 

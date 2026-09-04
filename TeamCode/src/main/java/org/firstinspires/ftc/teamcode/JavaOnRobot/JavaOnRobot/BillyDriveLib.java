@@ -1,40 +1,56 @@
 package org.firstinspires.ftc.teamcode.JavaOnRobot.JavaOnRobot;
 
-import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
+/// --- PID ---
+/// dt = delta time
+/// derivative = (err - lastErr) / dt
+/// integral = err * dt
+/// pow = kp*err + ki*integral + kd*derivative
+/// output = kp*err + ki∫err*dt + kd*(de/dt)
+
+/// Thứ tự thực hiện:
+///  - Điều chỉnh và test motor
+///  - Chỉnh Odometry
+///  - Tuning PID
+///  - Test path cơ bản
+
 public class BillyDriveLib {
-    public DcMotor leftfront, rightfront, leftback, rightback;
-    public DcMotor horizontal, vertical;
-    public IMU imu;
-    /// LOCATION
-    public double x = 0, y = 0;
-    public double heading = 0;
-    double lastHeading = 0;
+
+    DcMotor leftfront, rightfront, leftback, rightback;
+    DcMotor horizontal, vertical;
+    IMU imu;
+
+    BezierCurve currentPath = null;
+
+    double x = 0, y = 0, heading = 0;
+    double lastX = 0, lastY = 0, lastYaw = 0;
+    double verticalXOffset = 0, horizontalYOffset = 0;
+
+    // Odometry conversion
     double MMperTick = 0;
     double xEnOffset = 0, yEnOffset = 0;
     /// PID VALUE
-    double safeRange = 10;
-    double safeAngleRange = Math.toRadians(2); // Khoảng cách góc an toàn (2 độ)
-    double lastX = 0, lastY = 0;
-    double TargetX = 0, TargetY = 0;
-    double TargetHeading = 0;
-
-    // PID cho di chuyển
-    double kp = 0, ki = 0, kd = 0;
-    PID pid = new PID(kp, ki, kd);
-
-    // PID cho xoay
-    double kp_turn = 0.5, ki_turn = 0, kd_turn = 0; // Cần tuning lại
-    PID turnPid = new PID(kp_turn, ki_turn, kd_turn);
+    double TargetX = 0, TargetY = 0, TargetHeading = 0;
 
     ElapsedTime runtime = new ElapsedTime();
-    private boolean isRunning = false;
+
+    String mode = "";
+
+    // Path follower constants
+    double movePower = 0.6;
+    double slowPower = 0.2;
+    double endTolerance = 30;
+    double slowDistance = 200;
+    double pathPower = 0.5;
+    boolean isRunning = true;
 
     public BillyDriveLib(HardwareMap hardwareMap) {
         leftfront = hardwareMap.get(DcMotor.class, "leftFront");
@@ -46,23 +62,286 @@ public class BillyDriveLib {
         vertical = hardwareMap.get(DcMotor.class, "vertical");
 
         imu = hardwareMap.get(IMU.class, "imu");
+
         imu.initialize(new IMU.Parameters(
                 new RevHubOrientationOnRobot(
                         RevHubOrientationOnRobot.LogoFacingDirection.UP,
                         RevHubOrientationOnRobot.UsbFacingDirection.FORWARD
                 )
         ));
+
         imu.resetYaw();
+
+        lastX = vertical.getCurrentPosition();
+        lastY = horizontal.getCurrentPosition();
     }
 
+    void updateLocation() {
+
+        double vx = vertical.getCurrentPosition();
+        double vy = horizontal.getCurrentPosition();
+
+        double dx = (vx - lastX) * MMperTick;
+        double dy = (vy - lastY) * MMperTick;
+
+        lastX = vx;
+        lastY = vy;
+
+        double yaw = imu.getRobotYawPitchRollAngles()
+                .getYaw(AngleUnit.RADIANS);
+
+        // Góc robot vừa xoay
+        double dYaw = yaw - lastYaw;
+
+        // Normalize về [-PI, PI]
+        while (dYaw > Math.PI)
+            dYaw -= 2 * Math.PI;
+
+        while (dYaw < -Math.PI)
+            dYaw += 2 * Math.PI;
+
+        lastYaw = yaw;
+
+
+        // ==========================================
+        // BÙ SAI LỆCH DO ODO KHÔNG NẰM Ở TÂM
+        // ==========================================
+
+        // Vị trí của odo so với tâm robot
+        //
+        // verticalXOffset:
+        //      + nếu vertical odo nằm phía trước tâm
+        //      - nếu nằm phía sau
+        //
+        // horizontalYOffset:
+        //      + nếu horizontal odo nằm bên phải
+        //      - nếu nằm bên trái
+
+        double rotationDx =
+                -horizontalYOffset * (1 - Math.cos(dYaw))
+                        - verticalXOffset * Math.sin(dYaw);
+
+        double rotationDy =
+                verticalXOffset * (1 - Math.cos(dYaw))
+                        - horizontalYOffset * Math.sin(dYaw);
+
+
+        // Trừ chuyển động giả do robot xoay
+        dx -= rotationDx;
+        dy -= rotationDy;
+
+
+        // ==========================================
+        // ROBOT COORDINATES -> FIELD COORDINATES
+        // ==========================================
+
+        double fieldY =
+                dx * Math.cos(yaw)
+                        - dy * Math.sin(yaw);
+
+        double fieldX =
+                dx * Math.sin(yaw)
+                        + dy * Math.cos(yaw);
+
+        x += fieldX;
+        y += fieldY;
+    }
+
+    // =========================================================
+    // GOTO
+    // =========================================================
+
+    public void GoTo(double targetX, double targetY) {
+        TargetX = targetX;
+        TargetY = targetY;
+
+        mode = "GoTo";
+    }
+
+
+
+    // =========================================================
+    // BEZIER PATH
+    // =========================================================
+
+    public void followPath(BezierCurve path) {
+        currentPath = path;
+        mode = "Bezier";
+    }
+
+    double findClosestT(BezierCurve path) {
+
+        double bestT = 0;
+        double bestDistance = Double.MAX_VALUE;
+
+        // Brute-force closest point search
+        for (double t = 0; t <= 1.0; t += 0.01) {
+
+            Point point = path.getPoint(t);
+
+            double dx = point.x - x;
+            double dy = point.y - y;
+
+            // Squared Euclidean distance
+            double distanceSquared = dx * dx + dy * dy;
+
+            if (distanceSquared < bestDistance) {
+                bestDistance = distanceSquared;
+                bestT = t;
+            }
+        }
+
+        return bestT;
+    }
+    //    void TurnTo(double angleDegrees) {
+//        turnPid.reset();
+//        TargetHeading = Math.toRadians(angleDegrees);
+//    }
+    // =========================================================
+    // UPDATE RUNNING
+    // =========================================================
+    void updateRunning() {
+
+        // =========================
+        // GOTO
+        // =========================
+
+        if (mode.equals("GoTo")) {
+
+            double errorX = TargetX - x;
+            double errorY = TargetY - y;
+
+            // Euclidean distance to target
+            double distance = Math.hypot(errorX, errorY);
+
+            if (distance <= endTolerance) {
+                drivePower(0, 0);
+                mode = "MotorTest";
+                return;
+            }
+
+            double power;
+
+            if (distance < slowDistance) {
+                power = slowPower;
+            } else {
+                power = movePower;
+            }
+
+            // Normalize direction vector
+            double fieldX = errorX / distance * power;
+            double fieldY = errorY / distance * power;
+
+            double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+
+            // Field coordinates -> Robot coordinates
+            double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
+            double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
+
+            drivePower(robotX, robotY);
+        }
+
+        // =========================
+        // BEZIER
+        // =========================
+
+        else if (mode.equals("Bezier")) {
+
+            if (currentPath == null) {
+                drivePower(0, 0);
+                mode = "MotorTest";
+                return;
+            }
+
+            // Closest parameter on the Bezier curve
+            double t = findClosestT(currentPath);
+
+            // Closest point on the curve
+            Point closestPoint = currentPath.getPoint(t);
+
+            // Tangent vector B'(t)
+            Point tangent = currentPath.getDerivative(t);
+
+            double tangentLength = Math.hypot(tangent.x, tangent.y);
+
+            if (tangentLength < 0.000001) {
+                drivePower(0, 0);
+                return;
+            }
+
+            // Normalize tangent vector
+            double tangentX = tangent.x / tangentLength;
+            double tangentY = tangent.y / tangentLength;
+
+            // Cross-track correction vector
+            double correctionX = closestPoint.x - x;
+            double correctionY = closestPoint.y - y;
+            double correctionDistance = Math.hypot(correctionX, correctionY);
+
+            if (correctionDistance > 0.001) {
+                correctionX /= correctionDistance;
+                correctionY /= correctionDistance;
+            } else {
+                correctionX = 0;
+                correctionY = 0;
+            }
+
+            // Tangent vector + correction vector
+            double fieldX = tangentX * pathPower + correctionX;
+            double fieldY = tangentY * pathPower + correctionY;
+
+            double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+
+            // Field coordinates -> Robot coordinates
+            double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
+            double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
+
+            drivePower(robotX, robotY);
+
+            // Distance to endpoint
+            double endErrorX = currentPath.end.x - x;
+            double endErrorY = currentPath.end.y - y;
+            double endDistance = Math.hypot(endErrorX, endErrorY);
+
+            // Path completion
+            if (t >= 0.98 && endDistance <= endTolerance) {
+                drivePower(0, 0);
+                currentPath = null;
+                mode = "MotorTest";
+                return;
+            }
+        }
+    }
+
+    double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    void drivePower(double x, double y) {
+
+        double lf = y + x;
+        double rf = y - x;
+        double lb = y - x;
+        double rb = y + x;
+
+        // Normalize mecanum motor power
+        double max = Math.max(1.0, Math.max(Math.max(Math.abs(lf), Math.abs(rf)), Math.max(Math.abs(lb), Math.abs(rb))));
+
+        leftfront.setPower(lf / max);
+        rightfront.setPower(rf / max);
+        leftback.setPower(lb / max);
+        rightback.setPower(rb / max);
+    }
     public void start() {
         isRunning = true;
+
         new Thread(() -> {
             while (isRunning) {
                 updateLocation();
                 updateRunning();
+
                 try {
-                    Thread.sleep(10); // Tránh chiếm dụng CPU quá mức
+                    Thread.sleep(10);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
@@ -72,117 +351,14 @@ public class BillyDriveLib {
 
     public void stop() {
         isRunning = false;
-        drivePower(0, 0, 0);
-    }
-
-    void updateLocation() {
-        double vx = vertical.getCurrentPosition();
-        double vy = horizontal.getCurrentPosition();
-
-        double yaw = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
-        heading = yaw; // Cập nhật hướng hiện tại
-        double oldHeading = lastHeading;
-        double deltaYaw = yaw - lastHeading;
-
-        while (deltaYaw > Math.PI) deltaYaw -= 2 * Math.PI;
-        while (deltaYaw < -Math.PI) deltaYaw += 2 * Math.PI;
-        lastHeading = yaw;
-
-        double dx = (vx - lastX) * MMperTick;
-        double dy = (vy - lastY) * MMperTick;
-        lastX = vx;
-        lastY = vy;
-
-        dx -= xEnOffset * deltaYaw;
-        dy -= yEnOffset * deltaYaw;
-
-        double midHeading = oldHeading + deltaYaw / 2;
-
-        y += dx * Math.cos(midHeading) - dy * Math.sin(midHeading);
-        x += dx * Math.sin(midHeading) + dy * Math.cos(midHeading);
-    }
-
-    public void GoTo(double x, double y) {
-        pid.reset();
-        TargetX = x;
-        TargetY = y;
-    }
-
-    /**
-     * Xoay robot tới một góc mong muốn
-     * @param angleDegrees Góc tính theo độ (0 - 360 hoặc âm)
-     */
-    public void TurnTo(double angleDegrees) {
-        turnPid.reset();
-        TargetHeading = Math.toRadians(angleDegrees);
-    }
-
-    void updateRunning() {
-        // --- Tính toán di chuyển (X, Y) ---
-        double errorX = TargetX - x;
-        double errorY = TargetY - y;
-        double distance = Math.hypot(errorX, errorY);
-
-        // --- Tính toán xoay (Heading) ---
-        double errorYaw = TargetHeading - heading;
-        // Chuẩn hóa góc để luôn quay theo đường ngắn nhất
-        while (errorYaw > Math.PI) errorYaw -= 2 * Math.PI;
-        while (errorYaw < -Math.PI) errorYaw += 2 * Math.PI;
-
-        double dt = runtime.seconds();
-        runtime.reset();
-        dt = Math.max(dt, 0.001);
-
-        // Xử lý công suất xoay
-        double turnPower = 0;
-        if (Math.abs(errorYaw) > safeAngleRange) {
-            turnPower = turnPid.update(errorYaw, dt);
-        }
-
-        // Xử lý công suất di chuyển
-        double movePower = 0;
-        double robotX = 0;
-        double robotY = 0;
-
-        if (distance > safeRange) {
-            movePower = pid.update(distance, dt);
-            movePower = Math.max(-1, Math.min(1, movePower));
-
-            // Chuyển đổi từ hệ tọa độ sân đấu sang hệ tọa độ robot
-            robotX = errorX * Math.cos(heading) + errorY * Math.sin(heading);
-            robotY = -errorX * Math.sin(heading) + errorY * Math.cos(heading);
-            
-            robotX /= distance;
-            robotY /= distance;
-            
-            robotX *= movePower;
-            robotY *= movePower;
-        }
-
-        drivePower(robotX, robotY, turnPower);
-    }
-
-    void drivePower(double x, double y, double rx) {
-        double lf = y + x + rx;
-        double rf = y - x - rx;
-        double lb = y - x + rx;
-        double rb = y + x - rx;
-
-        double max = Math.max(1.0, Math.max(
-                Math.max(Math.abs(lf), Math.abs(rf)),
-                Math.max(Math.abs(lb), Math.abs(rb))
-        ));
-
-        leftfront.setPower(lf / max);
-        rightfront.setPower(rf / max);
-        leftback.setPower(lb / max);
-        rightback.setPower(rb / max);
+        drivePower(0, 0);
     }
 }
 
-class PID {
-    double kP, kI, kD;
 
+class PID {
+
+    double kP, kI, kD;
     double integral = 0;
     double lastError = 0;
 
@@ -193,15 +369,18 @@ class PID {
     }
 
     double update(double error, double dt) {
+
+        if (dt < 0.000001) {
+            dt = 0.000001;
+        }
+
         integral += error * dt;
-        integral = Math.max(-1000, Math.min(1000, integral));
 
         double derivative = (error - lastError) / dt;
         lastError = error;
 
-        return kP * error
-                + kI * integral
-                + kD * derivative;
+        // PID formula
+        return kP * error + kI * integral + kD * derivative;
     }
 
     void reset() {
@@ -209,3 +388,47 @@ class PID {
         lastError = 0;
     }
 }
+
+
+class Point {
+
+    double x, y;
+
+    Point(double x, double y) {
+        this.x = x;
+        this.y = y;
+    }
+}
+
+
+class BezierCurve {
+
+    Point start, control, end;
+
+    BezierCurve(Point start, Point control, Point end) {
+        this.start = start;
+        this.control = control;
+        this.end = end;
+    }
+
+    Point getPoint(double t) {
+
+        double u = 1.0 - t;
+
+        // Quadratic Bezier formula B(t)
+        double x = u * u * start.x + 2 * u * t * control.x + t * t * end.x;
+        double y = u * u * start.y + 2 * u * t * control.y + t * t * end.y;
+
+        return new Point(x, y);
+    }
+
+    Point getDerivative(double t) {
+
+        // First derivative B'(t) = tangent vector
+        double dx = 2 * (1 - t) * (control.x - start.x) + 2 * t * (end.x - control.x);
+        double dy = 2 * (1 - t) * (control.y - start.y) + 2 * t * (end.y - control.y);
+
+        return new Point(dx, dy);
+    }
+}
+
