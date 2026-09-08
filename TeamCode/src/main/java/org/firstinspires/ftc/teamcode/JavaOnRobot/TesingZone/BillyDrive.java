@@ -49,6 +49,11 @@ public class BillyDrive extends LinearOpMode {
     double endTolerance = 30;
     double slowDistance = 200;
     double pathPower = 0.5;
+    double turnFastPower = 0.5;
+    double turnSlowPower = 0.2;
+
+    double turnSlowAngle = Math.toRadians(20);
+    double turnTolerance = Math.toRadians(2);
 
     @Override
     public void runOpMode() throws InterruptedException {
@@ -229,10 +234,13 @@ public class BillyDrive extends LinearOpMode {
 
         return bestT;
     }
-//    void TurnTo(double angleDegrees) {
-//        turnPid.reset();
-//        TargetHeading = Math.toRadians(angleDegrees);
-//    }
+    // =========================================================
+    // UPDATE TURN TO
+    // =========================================================
+    void TurnTo(double angleDegrees) {
+        TargetHeading = Math.toRadians(angleDegrees);
+        mode = "TurnTo";
+    }
     // =========================================================
     // UPDATE RUNNING
     // =========================================================
@@ -251,7 +259,7 @@ public class BillyDrive extends LinearOpMode {
             double distance = Math.hypot(errorX, errorY);
 
             if (distance <= endTolerance) {
-                drivePower(0, 0);
+                drivePower(0, 0, 0);
                 mode = "MotorTest";
                 return;
             }
@@ -274,7 +282,7 @@ public class BillyDrive extends LinearOpMode {
             double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
             double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
 
-            drivePower(robotX, robotY);
+            drivePower(robotX, robotY, 0);
 
             telemetry.addData("Target X", TargetX);
             telemetry.addData("Target Y", TargetY);
@@ -289,7 +297,7 @@ public class BillyDrive extends LinearOpMode {
         else if (mode.equals("Bezier")) {
 
             if (currentPath == null) {
-                drivePower(0, 0);
+                drivePower(0, 0, 0);
                 mode = "MotorTest";
                 return;
             }
@@ -306,7 +314,7 @@ public class BillyDrive extends LinearOpMode {
             double tangentLength = Math.hypot(tangent.x, tangent.y);
 
             if (tangentLength < 0.000001) {
-                drivePower(0, 0);
+                drivePower(0, 0, 0);
                 return;
             }
 
@@ -337,7 +345,7 @@ public class BillyDrive extends LinearOpMode {
             double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
             double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
 
-            drivePower(robotX, robotY);
+            drivePower(robotX, robotY, 0);
 
             // Distance to endpoint
             double endErrorX = currentPath.end.x - x;
@@ -346,7 +354,7 @@ public class BillyDrive extends LinearOpMode {
 
             // Path completion
             if (t >= 0.98 && endDistance <= endTolerance) {
-                drivePower(0, 0);
+                drivePower(0, 0, 0);
                 currentPath = null;
                 mode = "MotorTest";
                 return;
@@ -357,6 +365,49 @@ public class BillyDrive extends LinearOpMode {
             telemetry.addData("End Distance", endDistance);
             telemetry.addData("Tangent X", tangentX);
             telemetry.addData("Tangent Y", tangentY);
+        } else if (mode.equals("TurnTo")) {
+
+            double yaw = imu.getRobotYawPitchRollAngles()
+                    .getYaw(AngleUnit.RADIANS);
+
+            // Tính sai số góc
+            double error = TargetHeading - yaw;
+
+            // Đưa error về [-PI, PI]
+            while (error > Math.PI)
+                error -= 2 * Math.PI;
+
+            while (error < -Math.PI)
+                error += 2 * Math.PI;
+
+            double absError = Math.abs(error);
+
+            // Đã tới góc
+            if (absError <= turnTolerance) {
+                drivePower(0, 0, 0);
+                mode = "MotorTest";
+                return;
+            }
+
+            // Xa thì nhanh, gần thì chậm
+            double power;
+
+            if (absError > turnSlowAngle) {
+                power = turnFastPower;
+            } else {
+                power = turnSlowPower;
+            }
+
+            // error > 0: xoay một chiều
+            // error < 0: xoay chiều ngược lại
+            double turn = Math.signum(error) * power;
+
+            drivePower(0, 0, turn);
+
+            telemetry.addData("Target Heading", Math.toDegrees(TargetHeading));
+            telemetry.addData("Current Heading", Math.toDegrees(yaw));
+            telemetry.addData("Turn Error", Math.toDegrees(error));
+            telemetry.addData("Turn Power", power);
         }
     }
 
@@ -364,15 +415,20 @@ public class BillyDrive extends LinearOpMode {
         return Math.max(min, Math.min(max, value));
     }
 
-    void drivePower(double x, double y) {
+    void drivePower(double x, double y, double turn) {
 
-        double lf = y + x;
-        double rf = y - x;
-        double lb = y - x;
-        double rb = y + x;
+        double lf = y + x + turn;
+        double rf = y - x - turn;
+        double lb = y - x + turn;
+        double rb = y + x - turn;
 
-        // Normalize mecanum motor power
-        double max = Math.max(1.0, Math.max(Math.max(Math.abs(lf), Math.abs(rf)), Math.max(Math.abs(lb), Math.abs(rb))));
+        double max = Math.max(
+                1.0,
+                Math.max(
+                        Math.max(Math.abs(lf), Math.abs(rf)),
+                        Math.max(Math.abs(lb), Math.abs(rb))
+                )
+        );
 
         leftfront.setPower(lf / max);
         rightfront.setPower(rf / max);
@@ -383,8 +439,9 @@ public class BillyDrive extends LinearOpMode {
     void MotorTest() {
         double x = gamepad1.left_stick_x;
         double y = gamepad1.left_stick_y;
+        double turn = gamepad1.right_stick_x;
 
-        drivePower(x, y);
+        drivePower(x, y, turn);
     }
 }
 
