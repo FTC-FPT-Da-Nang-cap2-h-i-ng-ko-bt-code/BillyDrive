@@ -50,6 +50,11 @@ public class BillyDriveLib {
     double endTolerance = 30;
     double slowDistance = 200;
     double pathPower = 0.5;
+    double turnFastPower = 0.5;
+    double turnSlowPower = 0.2;
+
+    double turnSlowAngle = Math.toRadians(20);
+    double turnTolerance = Math.toRadians(2);
     boolean isRunning = true;
 
     public BillyDriveLib(HardwareMap hardwareMap) {
@@ -146,6 +151,13 @@ public class BillyDriveLib {
         x += fieldX;
         y += fieldY;
     }
+    // =========================================================
+    // UPDATE TURN TO
+    // =========================================================
+    void TurnTo(double angleDegrees) {
+        TargetHeading = Math.toRadians(angleDegrees);
+        mode = "TurnTo";
+    }
 
     // =========================================================
     // GOTO
@@ -193,10 +205,6 @@ public class BillyDriveLib {
 
         return bestT;
     }
-//    void TurnTo(double angleDegrees) {
-//        turnPid.reset();
-//        TargetHeading = Math.toRadians(angleDegrees);
-//    }
     // =========================================================
     // UPDATE RUNNING
     // =========================================================
@@ -215,7 +223,7 @@ public class BillyDriveLib {
             double distance = Math.hypot(errorX, errorY);
 
             if (distance <= endTolerance) {
-                drivePower(0, 0);
+                drivePower(0, 0, 0);
                 mode = "MotorTest";
                 return;
             }
@@ -238,7 +246,7 @@ public class BillyDriveLib {
             double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
             double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
 
-            drivePower(robotX, robotY);
+            drivePower(robotX, robotY, 0);
         }
 
         // =========================
@@ -248,7 +256,7 @@ public class BillyDriveLib {
         else if (mode.equals("Bezier")) {
 
             if (currentPath == null) {
-                drivePower(0, 0);
+                drivePower(0, 0, 0);
                 mode = "MotorTest";
                 return;
             }
@@ -265,7 +273,7 @@ public class BillyDriveLib {
             double tangentLength = Math.hypot(tangent.x, tangent.y);
 
             if (tangentLength < 0.000001) {
-                drivePower(0, 0);
+                drivePower(0, 0, 0);
                 return;
             }
 
@@ -296,7 +304,7 @@ public class BillyDriveLib {
             double robotX = fieldX * Math.cos(yaw) - fieldY * Math.sin(yaw);
             double robotY = fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
 
-            drivePower(robotX, robotY);
+            drivePower(robotX, robotY, 0);
 
             // Distance to endpoint
             double endErrorX = currentPath.end.x - x;
@@ -305,11 +313,49 @@ public class BillyDriveLib {
 
             // Path completion
             if (t >= 0.98 && endDistance <= endTolerance) {
-                drivePower(0, 0);
+                drivePower(0, 0, 0);
                 currentPath = null;
                 mode = "MotorTest";
                 return;
             }
+        } else if (mode.equals("TurnTo")) {
+
+            double yaw = imu.getRobotYawPitchRollAngles()
+                    .getYaw(AngleUnit.RADIANS);
+
+            // Tính sai số góc
+            double error = TargetHeading - yaw;
+
+            // Đưa error về [-PI, PI]
+            while (error > Math.PI)
+                error -= 2 * Math.PI;
+
+            while (error < -Math.PI)
+                error += 2 * Math.PI;
+
+            double absError = Math.abs(error);
+
+            // Đã tới góc
+            if (absError <= turnTolerance) {
+                drivePower(0, 0, 0);
+                mode = "MotorTest";
+                return;
+            }
+
+            // Xa thì nhanh, gần thì chậm
+            double power;
+
+            if (absError > turnSlowAngle) {
+                power = turnFastPower;
+            } else {
+                power = turnSlowPower;
+            }
+
+            // error > 0: xoay một chiều
+            // error < 0: xoay chiều ngược lại
+            double turn = Math.signum(error) * power;
+
+            drivePower(0, 0, turn);
         }
     }
 
@@ -317,15 +363,20 @@ public class BillyDriveLib {
         return Math.max(min, Math.min(max, value));
     }
 
-    void drivePower(double x, double y) {
+    void drivePower(double x, double y, double turn) {
 
-        double lf = y + x;
-        double rf = y - x;
-        double lb = y - x;
-        double rb = y + x;
+        double lf = y + x + turn;
+        double rf = y - x - turn;
+        double lb = y - x + turn;
+        double rb = y + x - turn;
 
-        // Normalize mecanum motor power
-        double max = Math.max(1.0, Math.max(Math.max(Math.abs(lf), Math.abs(rf)), Math.max(Math.abs(lb), Math.abs(rb))));
+        double max = Math.max(
+                1.0,
+                Math.max(
+                        Math.max(Math.abs(lf), Math.abs(rf)),
+                        Math.max(Math.abs(lb), Math.abs(rb))
+                )
+        );
 
         leftfront.setPower(lf / max);
         rightfront.setPower(rf / max);
@@ -351,7 +402,7 @@ public class BillyDriveLib {
 
     public void stop() {
         isRunning = false;
-        drivePower(0, 0);
+        drivePower(0, 0, 0);
     }
 }
 
