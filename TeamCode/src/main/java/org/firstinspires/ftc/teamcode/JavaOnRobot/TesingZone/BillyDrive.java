@@ -2,7 +2,9 @@ package org.firstinspires.ftc.teamcode.JavaOnRobot.TesingZone;
 
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
@@ -20,7 +22,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 ///  - Chỉnh Odometry
 ///  - Tuning PID
 ///  - Test path cơ bản
-
+@TeleOp(name = "BillyDriveTest")
 public class BillyDrive extends LinearOpMode {
 
     DcMotor leftfront, rightfront, leftback, rightback;
@@ -35,7 +37,6 @@ public class BillyDrive extends LinearOpMode {
 
     // Odometry conversion
     double MMperTick = 0;
-    double xEnOffset = 0, yEnOffset = 0;
     /// PID VALUE
     double TargetX = 0, TargetY = 0, TargetHeading = 0;
 
@@ -58,20 +59,23 @@ public class BillyDrive extends LinearOpMode {
     @Override
     public void runOpMode() throws InterruptedException {
 
-        leftfront = hardwareMap.get(DcMotor.class, "");
-        rightfront = hardwareMap.get(DcMotor.class, "");
-        leftback = hardwareMap.get(DcMotor.class, "");
-        rightback = hardwareMap.get(DcMotor.class, "");
+        leftfront = hardwareMap.get(DcMotor.class, "m2");
+        rightfront = hardwareMap.get(DcMotor.class, "m4");
+        leftback = hardwareMap.get(DcMotor.class, "m1");
+        rightback = hardwareMap.get(DcMotor.class, "m3");
 
-        horizontal = hardwareMap.get(DcMotor.class, "");
-        vertical = hardwareMap.get(DcMotor.class, "");
+        horizontal = hardwareMap.get(DcMotor.class, "m1");
+        vertical = hardwareMap.get(DcMotor.class, "m4");
 
-        imu = hardwareMap.get(IMU.class, "");
+        leftfront.setDirection(DcMotorSimple.Direction.REVERSE);
+        leftback.setDirection(DcMotorSimple.Direction.REVERSE);
+
+        imu = hardwareMap.get(IMU.class, "imu");
 
         imu.initialize(new IMU.Parameters(
                 new RevHubOrientationOnRobot(
-                        RevHubOrientationOnRobot.LogoFacingDirection.UP,
-                        RevHubOrientationOnRobot.UsbFacingDirection.FORWARD
+                        RevHubOrientationOnRobot.LogoFacingDirection.RIGHT,
+                        RevHubOrientationOnRobot.UsbFacingDirection.UP
                 )
         ));
 
@@ -85,35 +89,38 @@ public class BillyDrive extends LinearOpMode {
         waitForStart();
 
 
-        // Example straight movement
-        GoTo(1000, 500);
+//        // Example straight movement
+//        GoTo(1000, 500);
+//
+//
+//        //Example curve movement
+//        BezierCurve testPath = new BezierCurve(
+//                new Point(0, 0),
+//                new Point(500, 800),
+//                new Point(1200, 0)
+//        );
+//
+//        followPath(testPath);
 
+        drivePower(1, 0, 0);
 
-
-        //Example curve movement
-        BezierCurve testPath = new BezierCurve(
-                new Point(0, 0),
-                new Point(500, 800),
-                new Point(1200, 0)
-        );
-
-        followPath(testPath);
 
 
         while (opModeIsActive()){
+            drivePower(1, 0, 0);
 
-            updateLocation();
-
-            if(mode.equals("GoTo")|| mode.equals("Bezier")){
-                updateRunning();
-            }else if (mode.equals("MotorTest")){
-                MotorTest();
-            }
-
-            telemetry.addData("Mode", mode);
-            telemetry.addData("x", x);
-            telemetry.addData("y", y);
-            telemetry.update();
+//            updateLocation();
+//
+//            if(mode.equals("GoTo")|| mode.equals("Bezier")){
+//                updateRunning();
+//            }else if (mode.equals("MotorTest")){
+//                MotorTest();
+//            }
+//
+//            telemetry.addData("Mode", mode);
+//            telemetry.addData("x", x);
+//            telemetry.addData("y", y);
+//            telemetry.update();
         }
     }
 
