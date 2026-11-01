@@ -31,6 +31,7 @@ public class BillyDrive extends LinearOpMode {
 
     BezierCurve currentPath = null;
 
+    // Location
     double x = 0, y = 0;
     double lastX = 0, lastY = 0, lastYaw = 0;
     double verticalXOffset = 0, horizontalYOffset = 0;
@@ -55,6 +56,18 @@ public class BillyDrive extends LinearOpMode {
 
     double turnSlowAngle = Math.toRadians(20);
     double turnTolerance = Math.toRadians(2);
+    /// Tuning value
+    // tuning encoder
+    private int verticalStart;
+    private int horizontalStart;
+
+    private double headingStart;
+    private boolean tuning = false;
+
+    private double verticalSum = 0;
+    private double horizontalSum = 0;
+    private double headingSum = 0;
+
 
     @Override
     public void runOpMode() throws InterruptedException {
@@ -102,15 +115,15 @@ public class BillyDrive extends LinearOpMode {
 //
 //        followPath(testPath);
 
-        drivePower(1, 0, 0);
 
-
-
+        tuningEncoder();
         while (opModeIsActive()){
-            drivePower(1, 0, 0);
+            /// Tuning x, y offset of encoder
+            takeValueTuneEncoder();
+            ///
 
 //            updateLocation();
-//
+            /// running path
 //            if(mode.equals("GoTo")|| mode.equals("Bezier")){
 //                updateRunning();
 //            }else if (mode.equals("MotorTest")){
@@ -123,7 +136,53 @@ public class BillyDrive extends LinearOpMode {
 //            telemetry.update();
         }
     }
+    /// Tuning function
 
+    void tuningEncoder() {
+        vertical.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        horizontal.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+
+        vertical.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        horizontal.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+
+        verticalStart = vertical.getCurrentPosition();
+        horizontalStart = horizontal.getCurrentPosition();
+
+        headingStart = getHeading(); // Hàm đọc IMU của bạn
+
+        tuning = true;
+
+        drivePower(0, 0, 0.3);
+    }
+    void takeValueTuneEncoder() {
+        if (!tuning) return;
+
+        int verticalCurrent = vertical.getCurrentPosition();
+        int horizontalCurrent = horizontal.getCurrentPosition();
+
+        double headingCurrent = getHeading();
+
+        double deltaVertical = verticalCurrent - verticalStart;
+        double deltaHorizontal = horizontalCurrent - horizontalStart;
+
+        double deltaHeading = Math.toRadians(
+                headingCurrent - headingStart
+        );
+
+        if (Math.abs(deltaHeading) >= 2 * Math.PI) {
+            drivePower(0, 0, 0);
+
+            verticalXOffset = -deltaVertical / deltaHeading;
+            horizontalYOffset = deltaHorizontal / deltaHeading;
+
+            tuning = false;
+
+            telemetry.addData("Vertical Offset", verticalXOffset);
+            telemetry.addData("Horizontal Offset", horizontalYOffset);
+            telemetry.update();
+        }
+    }
+    /// Update function
     void updateLocation() {
 
         double vx = vertical.getCurrentPosition();
@@ -247,6 +306,9 @@ public class BillyDrive extends LinearOpMode {
     void TurnTo(double angleDegrees) {
         TargetHeading = Math.toRadians(angleDegrees);
         mode = "TurnTo";
+    }
+    double getHeading(){
+        return imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
     }
     // =========================================================
     // UPDATE RUNNING
