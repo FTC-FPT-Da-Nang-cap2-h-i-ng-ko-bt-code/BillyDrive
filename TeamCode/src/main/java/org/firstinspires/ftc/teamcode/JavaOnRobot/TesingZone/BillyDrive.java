@@ -2,7 +2,9 @@ package org.firstinspires.ftc.teamcode.JavaOnRobot.TesingZone;
 
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
@@ -20,7 +22,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 ///  - Chỉnh Odometry
 ///  - Tuning PID
 ///  - Test path cơ bản
-
+@TeleOp(name = "BillyDriveTest")
 public class BillyDrive extends LinearOpMode {
 
     DcMotor leftfront, rightfront, leftback, rightback;
@@ -29,13 +31,13 @@ public class BillyDrive extends LinearOpMode {
 
     BezierCurve currentPath = null;
 
+    // Location
     double x = 0, y = 0;
     double lastX = 0, lastY = 0, lastYaw = 0;
     double verticalXOffset = 0, horizontalYOffset = 0;
 
     // Odometry conversion
     double MMperTick = 0;
-    double xEnOffset = 0, yEnOffset = 0;
     /// PID VALUE
     double TargetX = 0, TargetY = 0, TargetHeading = 0;
 
@@ -54,24 +56,60 @@ public class BillyDrive extends LinearOpMode {
 
     double turnSlowAngle = Math.toRadians(20);
     double turnTolerance = Math.toRadians(2);
+    /// Tuning value
+    // tuning encoder
+    private int verticalStart;
+    private int horizontalStart;
+
+    private double headingStart;
+    private boolean tuning = false;
+
+    private double verticalSum = 0;
+    private double horizontalSum = 0;
+    private double headingSum = 0;
+    // Drive calibration
+    private boolean driveTuning = false;
+
+    private double driveTestPower = 0;
+    private double driveStartTime = 0;
+    private double lastDriveVelocity = 0;
+    private double maxDriveVelocity = 0;
+    private double maxDriveAcceleration = 0;
+    private int lfStart, rfStart, lbStart, rbStart;
+    private double measuredVelocity = 0;
+    private double measuredAcceleration = 0;
+    private double driveTestDuration = 2.0;
+
+    private ElapsedTime driveTimer = new ElapsedTime();
+    private ElapsedTime driveSampleTimer = new ElapsedTime();
+
+    private int lastLF, lastRF, lastLB, lastRB;
+    private double velocitySum = 0;
+    private int velocitySamples = 0;
+
+    private double averageDriveVelocity = 0;
+
 
     @Override
     public void runOpMode() throws InterruptedException {
 
-        leftfront = hardwareMap.get(DcMotor.class, "");
-        rightfront = hardwareMap.get(DcMotor.class, "");
-        leftback = hardwareMap.get(DcMotor.class, "");
-        rightback = hardwareMap.get(DcMotor.class, "");
+        leftfront = hardwareMap.get(DcMotor.class, "m2");
+        rightfront = hardwareMap.get(DcMotor.class, "m4");
+        leftback = hardwareMap.get(DcMotor.class, "m1");
+        rightback = hardwareMap.get(DcMotor.class, "m3");
 
-        horizontal = hardwareMap.get(DcMotor.class, "");
-        vertical = hardwareMap.get(DcMotor.class, "");
+        horizontal = hardwareMap.get(DcMotor.class, "m1");
+        vertical = hardwareMap.get(DcMotor.class, "m4");
 
-        imu = hardwareMap.get(IMU.class, "");
+        leftfront.setDirection(DcMotorSimple.Direction.REVERSE);
+        leftback.setDirection(DcMotorSimple.Direction.REVERSE);
+
+        imu = hardwareMap.get(IMU.class, "imu");
 
         imu.initialize(new IMU.Parameters(
                 new RevHubOrientationOnRobot(
-                        RevHubOrientationOnRobot.LogoFacingDirection.UP,
-                        RevHubOrientationOnRobot.UsbFacingDirection.FORWARD
+                        RevHubOrientationOnRobot.LogoFacingDirection.RIGHT,
+                        RevHubOrientationOnRobot.UsbFacingDirection.UP
                 )
         ));
 
@@ -85,38 +123,218 @@ public class BillyDrive extends LinearOpMode {
         waitForStart();
 
 
-        // Example straight movement
-        GoTo(1000, 500);
+//        // Example straight movement
+//        GoTo(1000, 500);
+//
+//
+//        //Example curve movement
+//        BezierCurve testPath = new BezierCurve(
+//                new Point(0, 0),
+//                new Point(500, 800),
+//                new Point(1200, 0)
+//        );
+//
+//        followPath(testPath);
 
 
+//        tuningEncoder();
+        while (opModeIsActive()){
+            /// Tuning Drive
+            if (!driveTuning) {
+                startDriveCalibration(0.3);
+            } else {
+                collectDriveData();
+            }
+            /// Tuning x, y offset of encoder
+//            takeValueTuneEncoder();
+            ///
 
-        //Example curve movement
-        BezierCurve testPath = new BezierCurve(
-                new Point(0, 0),
-                new Point(500, 800),
-                new Point(1200, 0)
+//            updateLocation();
+            /// running path
+//            if(mode.equals("GoTo")|| mode.equals("Bezier")){
+//                updateRunning();
+//            }else if (mode.equals("MotorTest")){
+//                MotorTest();
+//            }
+//
+//            telemetry.addData("Mode", mode);
+//            telemetry.addData("x", x);
+//            telemetry.addData("y", y);
+//            telemetry.update();
+        }
+    }
+    /// Tuning function
+
+    void tuningEncoder() {
+        vertical.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        horizontal.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+
+        vertical.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+        horizontal.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+
+        verticalStart = vertical.getCurrentPosition();
+        horizontalStart = horizontal.getCurrentPosition();
+
+        headingStart = getHeading(); // Hàm đọc IMU của bạn
+
+        tuning = true;
+
+        drivePower(0, 0, 0.3);
+    }
+    void takeValueTuneEncoder() {
+        if (!tuning) return;
+
+        int verticalCurrent = vertical.getCurrentPosition();
+        int horizontalCurrent = horizontal.getCurrentPosition();
+
+        double headingCurrent = getHeading();
+
+        double deltaVertical = verticalCurrent - verticalStart;
+        double deltaHorizontal = horizontalCurrent - horizontalStart;
+
+        double deltaHeading = Math.toRadians(
+                headingCurrent - headingStart
         );
 
-        followPath(testPath);
+        if (Math.abs(deltaHeading) >= 2 * Math.PI) {
+            drivePower(0, 0, 0);
 
+            verticalXOffset = -deltaVertical / deltaHeading;
+            horizontalYOffset = deltaHorizontal / deltaHeading;
 
-        while (opModeIsActive()){
+            tuning = false;
 
-            updateLocation();
-
-            if(mode.equals("GoTo")|| mode.equals("Bezier")){
-                updateRunning();
-            }else if (mode.equals("MotorTest")){
-                MotorTest();
-            }
-
-            telemetry.addData("Mode", mode);
-            telemetry.addData("x", x);
-            telemetry.addData("y", y);
+            telemetry.addData("Vertical Offset", verticalXOffset);
+            telemetry.addData("Horizontal Offset", horizontalYOffset);
             telemetry.update();
         }
     }
+    /// Drivetuning function
+    void startDriveCalibration(double power) {
 
+        if (driveTuning) return;
+
+        driveTestPower = clamp(power, 0.1, 1.0);
+
+        // Không reset encoder
+        lastLF = leftfront.getCurrentPosition();
+        lastRF = rightfront.getCurrentPosition();
+        lastLB = leftback.getCurrentPosition();
+        lastRB = rightback.getCurrentPosition();
+
+        lastDriveVelocity = 0;
+
+        maxDriveVelocity = 0;
+        maxDriveAcceleration = 0;
+
+        velocitySum = 0;
+        velocitySamples = 0;
+
+        measuredVelocity = 0;
+        measuredAcceleration = 0;
+
+        driveTimer.reset();
+        driveSampleTimer.reset();
+
+        driveTuning = true;
+
+        // Chạy thẳng
+        drivePower(0, driveTestPower, 0);
+    }
+
+    void collectDriveData() {
+
+        if (!driveTuning) return;
+
+        double dt = driveSampleTimer.seconds();
+
+        if (dt < 0.01) return;
+
+        driveSampleTimer.reset();
+
+        // Đọc encoder
+        int lf = leftfront.getCurrentPosition();
+        int rf = rightfront.getCurrentPosition();
+        int lb = leftback.getCurrentPosition();
+        int rb = rightback.getCurrentPosition();
+
+        // Delta ticks
+        int dLF = lf - lastLF;
+        int dRF = rf - lastRF;
+        int dLB = lb - lastLB;
+        int dRB = rb - lastRB;
+
+        // Cập nhật encoder trước
+        lastLF = lf;
+        lastRF = rf;
+        lastLB = lb;
+        lastRB = rb;
+
+        // Trung bình độ dịch chuyển của 4 motor
+        double deltaTicks = (
+                Math.abs(dLF) +
+                        Math.abs(dRF) +
+                        Math.abs(dLB) +
+                        Math.abs(dRB)
+        ) / 4.0;
+
+        // Velocity (ticks/s)
+        measuredVelocity = deltaTicks / dt;
+
+        // Acceleration (ticks/s²)
+        measuredAcceleration =
+                (measuredVelocity - lastDriveVelocity) / dt;
+
+        lastDriveVelocity = measuredVelocity;
+
+        // Lưu kết quả
+        maxDriveVelocity = Math.max(
+                maxDriveVelocity,
+                measuredVelocity
+        );
+
+        maxDriveAcceleration = Math.max(
+                maxDriveAcceleration,
+                Math.abs(measuredAcceleration)
+        );
+
+        velocitySum += measuredVelocity;
+        velocitySamples++;
+
+        averageDriveVelocity =
+                velocitySum / velocitySamples;
+
+        // Telemetry
+        telemetry.addData("Drive Power", driveTestPower);
+        telemetry.addData("Velocity", measuredVelocity);
+        telemetry.addData("Acceleration", measuredAcceleration);
+        telemetry.addData("Max Velocity", maxDriveVelocity);
+        telemetry.addData("Max Acceleration", maxDriveAcceleration);
+        telemetry.addData("Elapsed", driveTimer.seconds());
+
+        // Tự kết thúc sau thời gian thử nghiệm
+        if (driveTimer.seconds() >= driveTestDuration) {
+            finishDriveCalibration();
+        }
+    }
+    void finishDriveCalibration() {
+
+        drivePower(0, 0, 0);
+
+        driveTuning = false;
+
+        telemetry.addLine("=== DRIVE CALIBRATION RESULT ===");
+
+        telemetry.addData("Test Power", driveTestPower);
+        telemetry.addData("Average Velocity", averageDriveVelocity);
+        telemetry.addData("Maximum Velocity", maxDriveVelocity);
+        telemetry.addData("Maximum Acceleration", maxDriveAcceleration);
+
+        telemetry.addData("Samples", velocitySamples);
+
+        telemetry.update();
+    }
+    /// Update function
     void updateLocation() {
 
         double vx = vertical.getCurrentPosition();
@@ -240,6 +458,9 @@ public class BillyDrive extends LinearOpMode {
     void TurnTo(double angleDegrees) {
         TargetHeading = Math.toRadians(angleDegrees);
         mode = "TurnTo";
+    }
+    double getHeading(){
+        return imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
     }
     // =========================================================
     // UPDATE RUNNING
