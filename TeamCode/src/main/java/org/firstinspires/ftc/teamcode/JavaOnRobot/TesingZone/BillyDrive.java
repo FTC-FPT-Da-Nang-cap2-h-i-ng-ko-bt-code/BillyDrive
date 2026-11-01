@@ -67,6 +67,27 @@ public class BillyDrive extends LinearOpMode {
     private double verticalSum = 0;
     private double horizontalSum = 0;
     private double headingSum = 0;
+    // Drive calibration
+    private boolean driveTuning = false;
+
+    private double driveTestPower = 0;
+    private double driveStartTime = 0;
+    private double lastDriveVelocity = 0;
+    private double maxDriveVelocity = 0;
+    private double maxDriveAcceleration = 0;
+    private int lfStart, rfStart, lbStart, rbStart;
+    private double measuredVelocity = 0;
+    private double measuredAcceleration = 0;
+    private double driveTestDuration = 2.0;
+
+    private ElapsedTime driveTimer = new ElapsedTime();
+    private ElapsedTime driveSampleTimer = new ElapsedTime();
+
+    private int lastLF, lastRF, lastLB, lastRB;
+    private double velocitySum = 0;
+    private int velocitySamples = 0;
+
+    private double averageDriveVelocity = 0;
 
 
     @Override
@@ -116,10 +137,16 @@ public class BillyDrive extends LinearOpMode {
 //        followPath(testPath);
 
 
-        tuningEncoder();
+//        tuningEncoder();
         while (opModeIsActive()){
+            /// Tuning Drive
+            if (!driveTuning) {
+                startDriveCalibration(0.3);
+            } else {
+                collectDriveData();
+            }
             /// Tuning x, y offset of encoder
-            takeValueTuneEncoder();
+//            takeValueTuneEncoder();
             ///
 
 //            updateLocation();
@@ -181,6 +208,131 @@ public class BillyDrive extends LinearOpMode {
             telemetry.addData("Horizontal Offset", horizontalYOffset);
             telemetry.update();
         }
+    }
+    /// Drivetuning function
+    void startDriveCalibration(double power) {
+
+        if (driveTuning) return;
+
+        driveTestPower = clamp(power, 0.1, 1.0);
+
+        // Không reset encoder
+        lastLF = leftfront.getCurrentPosition();
+        lastRF = rightfront.getCurrentPosition();
+        lastLB = leftback.getCurrentPosition();
+        lastRB = rightback.getCurrentPosition();
+
+        lastDriveVelocity = 0;
+
+        maxDriveVelocity = 0;
+        maxDriveAcceleration = 0;
+
+        velocitySum = 0;
+        velocitySamples = 0;
+
+        measuredVelocity = 0;
+        measuredAcceleration = 0;
+
+        driveTimer.reset();
+        driveSampleTimer.reset();
+
+        driveTuning = true;
+
+        // Chạy thẳng
+        drivePower(0, driveTestPower, 0);
+    }
+
+    void collectDriveData() {
+
+        if (!driveTuning) return;
+
+        double dt = driveSampleTimer.seconds();
+
+        if (dt < 0.01) return;
+
+        driveSampleTimer.reset();
+
+        // Đọc encoder
+        int lf = leftfront.getCurrentPosition();
+        int rf = rightfront.getCurrentPosition();
+        int lb = leftback.getCurrentPosition();
+        int rb = rightback.getCurrentPosition();
+
+        // Delta ticks
+        int dLF = lf - lastLF;
+        int dRF = rf - lastRF;
+        int dLB = lb - lastLB;
+        int dRB = rb - lastRB;
+
+        // Cập nhật encoder trước
+        lastLF = lf;
+        lastRF = rf;
+        lastLB = lb;
+        lastRB = rb;
+
+        // Trung bình độ dịch chuyển của 4 motor
+        double deltaTicks = (
+                Math.abs(dLF) +
+                        Math.abs(dRF) +
+                        Math.abs(dLB) +
+                        Math.abs(dRB)
+        ) / 4.0;
+
+        // Velocity (ticks/s)
+        measuredVelocity = deltaTicks / dt;
+
+        // Acceleration (ticks/s²)
+        measuredAcceleration =
+                (measuredVelocity - lastDriveVelocity) / dt;
+
+        lastDriveVelocity = measuredVelocity;
+
+        // Lưu kết quả
+        maxDriveVelocity = Math.max(
+                maxDriveVelocity,
+                measuredVelocity
+        );
+
+        maxDriveAcceleration = Math.max(
+                maxDriveAcceleration,
+                Math.abs(measuredAcceleration)
+        );
+
+        velocitySum += measuredVelocity;
+        velocitySamples++;
+
+        averageDriveVelocity =
+                velocitySum / velocitySamples;
+
+        // Telemetry
+        telemetry.addData("Drive Power", driveTestPower);
+        telemetry.addData("Velocity", measuredVelocity);
+        telemetry.addData("Acceleration", measuredAcceleration);
+        telemetry.addData("Max Velocity", maxDriveVelocity);
+        telemetry.addData("Max Acceleration", maxDriveAcceleration);
+        telemetry.addData("Elapsed", driveTimer.seconds());
+
+        // Tự kết thúc sau thời gian thử nghiệm
+        if (driveTimer.seconds() >= driveTestDuration) {
+            finishDriveCalibration();
+        }
+    }
+    void finishDriveCalibration() {
+
+        drivePower(0, 0, 0);
+
+        driveTuning = false;
+
+        telemetry.addLine("=== DRIVE CALIBRATION RESULT ===");
+
+        telemetry.addData("Test Power", driveTestPower);
+        telemetry.addData("Average Velocity", averageDriveVelocity);
+        telemetry.addData("Maximum Velocity", maxDriveVelocity);
+        telemetry.addData("Maximum Acceleration", maxDriveAcceleration);
+
+        telemetry.addData("Samples", velocitySamples);
+
+        telemetry.update();
     }
     /// Update function
     void updateLocation() {
