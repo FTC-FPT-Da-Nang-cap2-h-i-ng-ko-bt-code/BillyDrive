@@ -33,8 +33,9 @@ public class BillyDrive extends LinearOpMode {
 
     // Location
     double x = 0, y = 0;
+    double mmpertick = 0.0502655;
     double lastX = 0, lastY = 0, lastYaw = 0;
-    double verticalXOffset = 0, horizontalYOffset = 0;
+    double verticalXOffset = 78.3198, horizontalYOffset = 108.1107;
 
     // Odometry conversion
     double MMperTick = 0;
@@ -51,8 +52,8 @@ public class BillyDrive extends LinearOpMode {
     double endTolerance = 30;
     double slowDistance = 200;
     double pathPower = 0.5;
-    double turnFastPower = 0.5;
-    double turnSlowPower = 0.2;
+    double turnFastPower = 0.3;
+    double turnSlowPower = 0.1;
 
     double turnSlowAngle = Math.toRadians(20);
     double turnTolerance = Math.toRadians(2);
@@ -63,6 +64,8 @@ public class BillyDrive extends LinearOpMode {
 
     private double headingStart;
     private boolean tuning = false;
+    private double lastHeading = 0;
+    private double accumulatedHeading = 0;
 
     private double verticalSum = 0;
     private double horizontalSum = 0;
@@ -136,15 +139,13 @@ public class BillyDrive extends LinearOpMode {
 //
 //        followPath(testPath);
 
-
+//        startDriveCalibration(0.3);
 //        tuningEncoder();
         while (opModeIsActive()){
             /// Tuning Drive
-            if (!driveTuning) {
-                startDriveCalibration(0.3);
-            } else {
-                collectDriveData();
-            }
+//            if (driveTuning) {
+//                collectDriveData();
+//            }
             /// Tuning x, y offset of encoder
 //            takeValueTuneEncoder();
             ///
@@ -160,8 +161,13 @@ public class BillyDrive extends LinearOpMode {
 //            telemetry.addData("Mode", mode);
 //            telemetry.addData("x", x);
 //            telemetry.addData("y", y);
+//            telemetry.addData("rawx", vertical.getCurrentPosition());
+//            telemetry.addData("rawy", horizontal.getCurrentPosition());
 //            telemetry.update();
+
+            runAutonomousTests();
         }
+        drivePower(0,0,0);
     }
     /// Tuning function
 
@@ -175,7 +181,8 @@ public class BillyDrive extends LinearOpMode {
         verticalStart = vertical.getCurrentPosition();
         horizontalStart = horizontal.getCurrentPosition();
 
-        headingStart = getHeading(); // Hàm đọc IMU của bạn
+        lastHeading = getHeading();
+        accumulatedHeading = 0;
 
         tuning = true;
 
@@ -189,25 +196,45 @@ public class BillyDrive extends LinearOpMode {
 
         double headingCurrent = getHeading();
 
+        double deltaHeading = headingCurrent - lastHeading;
+
+        // Xử lý IMU wrap-around
+        while (deltaHeading > Math.PI)
+            deltaHeading -= 2 * Math.PI;
+
+        while (deltaHeading < -Math.PI)
+            deltaHeading += 2 * Math.PI;
+
+        accumulatedHeading += deltaHeading;
+        lastHeading = headingCurrent;
+
         double deltaVertical = verticalCurrent - verticalStart;
         double deltaHorizontal = horizontalCurrent - horizontalStart;
 
-        double deltaHeading = Math.toRadians(
-                headingCurrent - headingStart
-        );
+        if (Math.abs(accumulatedHeading) >= 2 * Math.PI) {
 
-        if (Math.abs(deltaHeading) >= 2 * Math.PI) {
             drivePower(0, 0, 0);
 
-            verticalXOffset = -deltaVertical / deltaHeading;
-            horizontalYOffset = deltaHorizontal / deltaHeading;
+            deltaVertical = (verticalCurrent - verticalStart) * mmpertick;
+
+            deltaHorizontal = (horizontalCurrent - horizontalStart) * mmpertick;
+
+            verticalXOffset = deltaVertical / accumulatedHeading;
+
+            horizontalYOffset = deltaHorizontal / accumulatedHeading;
 
             tuning = false;
 
-            telemetry.addData("Vertical Offset", verticalXOffset);
-            telemetry.addData("Horizontal Offset", horizontalYOffset);
-            telemetry.update();
+            telemetry.addData("Rotation", Math.toDegrees(accumulatedHeading));
+            telemetry.addData("Vertical Distance", deltaVertical);
+            telemetry.addData("Horizontal Distance", deltaHorizontal);
+
+            telemetry.addData("Vertical X Offset", verticalXOffset);
+            telemetry.addData("Horizontal Y Offset", horizontalYOffset);
         }
+        telemetry.addData("Accumulated Angle",
+                Math.toDegrees(accumulatedHeading));
+        telemetry.update();
     }
     /// Drivetuning function
     void startDriveCalibration(double power) {
@@ -279,7 +306,7 @@ public class BillyDrive extends LinearOpMode {
         ) / 4.0;
 
         // Velocity (ticks/s)
-        measuredVelocity = deltaTicks / dt;
+        measuredVelocity = deltaTicks * mmpertick / dt;
 
         // Acceleration (ticks/s²)
         measuredAcceleration =
@@ -312,6 +339,8 @@ public class BillyDrive extends LinearOpMode {
         telemetry.addData("Max Acceleration", maxDriveAcceleration);
         telemetry.addData("Elapsed", driveTimer.seconds());
 
+        telemetry.update();
+
         // Tự kết thúc sau thời gian thử nghiệm
         if (driveTimer.seconds() >= driveTestDuration) {
             finishDriveCalibration();
@@ -334,14 +363,53 @@ public class BillyDrive extends LinearOpMode {
 
         telemetry.update();
     }
+    // Test function
+    void runAutonomousTests() {
+
+        // Test 1: Xoay 90 độ
+        TurnTo(90);
+        waitForMotionComplete();
+
+        sleep(1000);
+
+        // Test 2: Xoay về 0 độ
+        TurnTo(0);
+        waitForMotionComplete();
+
+        sleep(1000);
+
+        // Test 3: Đi thẳng 300 mm
+        GoTo(x + 300, y);
+        waitForMotionComplete();
+
+        sleep(1000);
+
+        // Test 4: Đi ngang 300 mm
+        GoTo(x, y + 300);
+        waitForMotionComplete();
+
+        sleep(1000);
+
+        // Test 5: Bezier
+        BezierCurve path = new BezierCurve(
+                new Point(x, y),
+                new Point(x + 150, y + 150),
+                new Point(x + 300, y)
+        );
+
+        followPath(path);
+        waitForMotionComplete();
+
+        drivePower(0, 0, 0);
+    }
     /// Update function
     void updateLocation() {
 
         double vx = vertical.getCurrentPosition();
         double vy = horizontal.getCurrentPosition();
 
-        double dx = (vx - lastX) * MMperTick;
-        double dy = (vy - lastY) * MMperTick;
+        double dx = (vx - lastX) * mmpertick;
+        double dy = (vy - lastY) * mmpertick;
 
         lastX = vx;
         lastY = vy;
@@ -376,16 +444,15 @@ public class BillyDrive extends LinearOpMode {
         //      + nếu horizontal odo nằm bên phải
         //      - nếu nằm bên trái
 
-        double rotationDx =
-                -horizontalYOffset * (1 - Math.cos(dYaw))
-                        - verticalXOffset * Math.sin(dYaw);
+        // ==========================================
+        // ODOMETRY ROTATION COMPENSATION
+        // ==========================================
 
-        double rotationDy =
-                verticalXOffset * (1 - Math.cos(dYaw))
-                        - horizontalYOffset * Math.sin(dYaw);
+        // Rotation-induced movement
+        double rotationDx = verticalXOffset * dYaw;
+        double rotationDy = horizontalYOffset * dYaw;
 
-
-        // Trừ chuyển động giả do robot xoay
+        // Remove false displacement
         dx -= rotationDx;
         dy -= rotationDy;
 
@@ -394,11 +461,11 @@ public class BillyDrive extends LinearOpMode {
         // ROBOT COORDINATES -> FIELD COORDINATES
         // ==========================================
 
-        double fieldY =
+        double fieldX =
                 dx * Math.cos(yaw)
                         - dy * Math.sin(yaw);
 
-        double fieldX =
+        double fieldY =
                 dx * Math.sin(yaw)
                         + dy * Math.cos(yaw);
 
@@ -631,6 +698,25 @@ public class BillyDrive extends LinearOpMode {
             telemetry.addData("Turn Power", power);
         }
     }
+    void waitForMotionComplete() {
+        while (opModeIsActive()
+                && !mode.equals("MotorTest")) {
+
+            updateLocation();
+            updateRunning();
+
+            telemetry.addData("Mode", mode);
+            telemetry.addData("X", x);
+            telemetry.addData("Y", y);
+            telemetry.addData(
+                    "Heading",
+                    Math.toDegrees(getHeading())
+            );
+
+            telemetry.update();
+            idle();
+        }
+    }
 
     double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
@@ -741,5 +827,13 @@ class BezierCurve {
 
         return new Point(dx, dy);
     }
+}
+
+class DriveCalibrationResult {
+    public double maxVelocity;
+    public double maxAcceleration;
+    public double kV;
+    public double kA;
+    public double kStatic;
 }
 
