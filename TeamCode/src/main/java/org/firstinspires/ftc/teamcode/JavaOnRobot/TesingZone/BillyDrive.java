@@ -798,7 +798,8 @@ class Point {
 }
 
 
-class BezierCurve {
+class
+BezierCurve {
 
     Point start, control, end;
 
