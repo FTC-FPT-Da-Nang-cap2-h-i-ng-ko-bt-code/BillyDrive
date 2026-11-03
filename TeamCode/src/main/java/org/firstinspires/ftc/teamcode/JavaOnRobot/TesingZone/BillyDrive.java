@@ -56,7 +56,7 @@ public class BillyDrive extends LinearOpMode {
     double turnSlowPower = 0.1;
 
     double turnSlowAngle = Math.toRadians(20);
-    double turnTolerance = Math.toRadians(2);
+    double turnTolerance = Math.toRadians(5);
     /// Tuning value
     // tuning encoder
     private int verticalStart;
