@@ -52,11 +52,11 @@ public class BillyDrive extends LinearOpMode {
     double endTolerance = 30;
     double slowDistance = 200;
     double pathPower = 0.5;
-    double turnFastPower = 0.3;
-    double turnSlowPower = 0.1;
+    double turnFastPower = 0.2;
+    double turnSlowPower = 0.025;
 
     double turnSlowAngle = Math.toRadians(20);
-    double turnTolerance = Math.toRadians(5);
+    double turnTolerance = Math.toRadians(10);
     /// Tuning value
     // tuning encoder
     private int verticalStart;
@@ -658,15 +658,11 @@ public class BillyDrive extends LinearOpMode {
             double yaw = imu.getRobotYawPitchRollAngles()
                     .getYaw(AngleUnit.RADIANS);
 
-            // Tính sai số góc
-            double error = TargetHeading - yaw;
-
-            // Đưa error về [-PI, PI]
-            while (error > Math.PI)
-                error -= 2 * Math.PI;
-
-            while (error < -Math.PI)
-                error += 2 * Math.PI;
+            // Sai số góc, luôn nằm trong [-PI, PI]
+            double error = Math.atan2(
+                    Math.sin(TargetHeading + yaw),
+                    Math.cos(TargetHeading + yaw)
+            );
 
             double absError = Math.abs(error);
 
