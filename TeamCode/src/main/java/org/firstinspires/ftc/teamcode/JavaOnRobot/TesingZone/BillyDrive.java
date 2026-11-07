@@ -7,201 +7,138 @@ import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
-
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * BillyDrive
+ * BillyDrive - single-file FTC mecanum path follower.
  *
- * GoTo and Bezier share exactly one translational P gain: moveKp.
- * TurnTo has an independent rotational P gain: turnKp.
+ * Architecture inspired by the ideas used in Road Runner / PedroPathing:
+ * path geometry -> arc-length parameterization -> lookahead target ->
+ * velocity profile -> feedforward + position feedback -> mecanum output.
  *
- * IMPORTANT HARDWARE CONFIGURATION:
- * - Two independent perpendicular tracking-wheel encoders are connected
- *   to the encoder input ports exposed by motor devices m4 and m1.
- * - m4/m1 still control drivetrain motors; their encoder readings are
- *   supplied by the independent odometry wheels, not motor rotation.
+ * This is an original lightweight implementation, not a drop-in copy of
+ * either library. Coordinates: field +X = robot forward at heading 0;
+ * field +Y = robot right at heading 0; positive heading = CCW.
+ *
+ * HARDWARE:
+ * m2=LF, m4=RF, m1=LB, m3=RB.
+ * The independent vertical odometry pod is wired to m4's encoder input;
+ * the independent horizontal pod is wired to m1's encoder input.
+ * These are the existing Hub port objects, not extra hardwareMap names.
  */
 @TeleOp(name = "BillyDriveTest")
 public class BillyDrive extends LinearOpMode {
 
-    // ---------------------------------------------------------------------
-    // HARDWARE NAMES
-    // ---------------------------------------------------------------------
-
+    // -------------------------- Hardware ---------------------------------
     private static final String LF_NAME = "m2";
     private static final String RF_NAME = "m4";
     private static final String LB_NAME = "m1";
     private static final String RB_NAME = "m3";
 
-    // The odometry tracking wheels are wired to the encoder inputs on these
-    // motor controller ports. Sharing the DcMotor device mapping is intended.
-    private static final String ODO_VERTICAL_NAME = "m4";
-    private static final String ODO_HORIZONTAL_NAME = "m1";
-
-    // ---------------------------------------------------------------------
-    // HARDWARE
-    // ---------------------------------------------------------------------
-
-    private DcMotor leftFront;
-    private DcMotor rightFront;
-    private DcMotor leftBack;
-    private DcMotor rightBack;
-
-    private DcMotor odoVertical;
-    private DcMotor odoHorizontal;
-
+    private DcMotor leftFront, rightFront, leftBack, rightBack;
+    private DcMotor odoVertical, odoHorizontal;
     private IMU imu;
 
-    // ---------------------------------------------------------------------
-    // ODOMETRY
-    // ---------------------------------------------------------------------
-
-    private double x = 0.0;
-    private double y = 0.0;
-
-    // Millimeters per encoder tick. Verify this value for your odometry wheel.
+    // -------------------------- Odometry ----------------------------------
+    private double x, y;
     private double mmPerTick = 0.0502655;
-
-    private double lastVerticalTicks = 0.0;
-    private double lastHorizontalTicks = 0.0;
-    private double lastYaw = 0.0;
-
-    // Continuous heading accumulator. Unlike IMU yaw, this value does not
-    // jump from +180 to -180 degrees when the robot crosses the wrap boundary.
-    private double headingUnwrapped = 0.0;
-    private double turnTargetUnwrapped = 0.0;
-
-    // Odometry pod offsets relative to the robot center, in millimeters.
-    private double verticalXOffset = 78.3198;
-    private double horizontalYOffset = 108.1107;
-
-    // Change to -1 if an encoder reports the opposite direction.
-    private static final double VERTICAL_ENCODER_SIGN = 1.0;
+    private double lastVerticalTicks, lastHorizontalTicks, lastYaw;
+    private double xOffsetEncoder = 102.2281;
+    private double yOffsetEncoder = 115.0326;
+    private static final double VERTICAL_ENCODER_SIGN = -1.0;
     private static final double HORIZONTAL_ENCODER_SIGN = 1.0;
 
-    // ---------------------------------------------------------------------
-    // DRIVE / CONTROLLER CONFIGURATION
-    // ---------------------------------------------------------------------
+    // -------------------------- Follower tuning --------------------------
+    // moveKp is shared by GoTo and all path types.
+    // Units: motor-power correction per millimetre of position error.
+    private double moveKp = 0.0018;
+    private double moveMaxPower = 0.48;
 
-    // Shared by GoTo AND Bezier. Do not create separate gains for them.
-    private double moveKp = 0.0030;
-    private double moveMaxPower = 0.50;
+    // Path velocity profile / feedforward.
+    // Tune these only after odometry signs and scale are verified.
+    private double maxPathVelocity = 550.0;       // mm/s
+    private double maxPathAcceleration = 700.0;  // mm/s^2
+    private double pathVelocityK = 0.00062;      // power per mm/s
+    private double lookaheadDistance = 100.0;    // mm
+    private double pathEndTolerance = 18.0;       // mm
+    private double pathSettleVelocity = 35.0;     // mm/s
 
-    // Turn controller is independent from translational movement.
-    private double turnKp = 0.80;
+    // Independent heading hold for translation/path following.
+    private double headingHoldKp = 0.90;
+    private double headingHoldKd = 0.035;
+    private double headingHoldMaxPower = 0.20;
+    private double headingHoldTarget;
+    private double previousHeadingError;
+    private final ElapsedTime headingTimer = new ElapsedTime();
+
+    // TurnTo settings. Keep the user's existing TurnTo error convention.
+    private double turnKp = 0.3125;
     private double turnMaxPower = 0.35;
     private double turnMinPower = 0.06;
-
-    // Keep raw IMU yaw unchanged: CCW is negative on this robot.
-    // With the current mecanum mixing, positive turnPower is expected to
-    // produce CW (positive raw yaw). If the short pulse test proves otherwise,
-    // change this constant to -1.0.
-    private static final double TURN_OUTPUT_SIGN = 1.0;
-
-    private double endTolerance = 20.0; // mm
     private double turnTolerance = Math.toRadians(2.5);
 
-    private double bezierLookaheadT = 0.12;
-    private double bezierProgress = 0.0;
-
-    // ---------------------------------------------------------------------
-    // AUTO TUNING CONFIGURATION
-    // ---------------------------------------------------------------------
-
+    // -------------------------- Auto tuning -------------------------------
     private double moveKpMin = 0.0005;
-    private double moveKpMax = 0.0060;
-
-    private double turnKpMin = 0.10;
-    private double turnKpMax = 0.80;
-
-    // No automatic return between trials. Stop tuning if the robot moves
-    // farther than this radius from the physical starting pose.
-    private double maxTuningRadius = 300.0; // mm
-
-    // Two coarse-to-fine rounds (6 candidates maximum per controller).
-    // More rounds increase robot travel and odometry drift substantially.
-    private int moveTuningRounds = 1;
-    private int turnTuningRounds = 1;
-
-    // Keep tuning inside a compact, safer area.
-    private double testDistance = 100.0; // mm
-    private double testTurnAngle = Math.toRadians(45.0);
-
-    private double moveTrialTimeout = 2.5;
-    private double turnTrialTimeout = 4.0;
-    // Movement tests alternate direction to limit cumulative displacement.
-    private int movementTrialCount = 0;
-    private int turnTrialCount = 0;
-
-    private double bestMoveKp = 0.0;
-    private double bestTurnKp = 0.0;
-
+    private double moveKpMax = 0.0040;
+    private double testDistance = 220.0;
+    private double moveTrialTimeout = 7.0;
+    private double returnTimeout = 7.0;
+    private double maxTrialDisplacement = 420.0;
+    private double tuningOriginX, tuningOriginY;
+    private int totalTrials;
+    private double bestMoveKp;
     private double bestMoveScore = Double.MAX_VALUE;
-    private double bestTurnScore = Double.MAX_VALUE;
-
-    private int totalTrials = 0;
-    private boolean tuningCompleted = false;
-    private boolean tuningFailed = false;
-
-    // Persistent diagnostics: finishAutoTuning must show WHY tuning failed.
-    private String tuningStage = "Initializing";
+    private boolean tuningCompleted, tuningFailed;
+    private String tuningStage = "Not started";
     private String failureReason = "";
     private String lastTrialResult = "No trial completed";
 
-    // Fixed reference used only as a safety boundary. Each trial starts
-    // from the robot's CURRENT measured pose; no return-to-origin is used.
-    private double tuningOriginX = 0.0;
-    private double tuningOriginY = 0.0;
-    private double tuningOriginHeading = 0.0;
+    private enum TuningMode { MOVE_KP, TURN_KP, ENCODER_OFFSETS }
+    private TuningMode selectedTuningMode = TuningMode.MOVE_KP;
 
-    // ---------------------------------------------------------------------
-    // MOTION STATE
-    // ---------------------------------------------------------------------
-
-    private static final String IDLE = "Idle";
-    private static final String GOTO = "GoTo";
-    private static final String BEZIER = "Bezier";
-    private static final String TURN = "TurnTo";
-
-    private String mode = IDLE;
-
-    private double targetX = 0.0;
-    private double targetY = 0.0;
-    private double targetHeading = 0.0;
-
-    private BezierCurve currentPath = null;
-
-    // ---------------------------------------------------------------------
-    // OP MODE
-    // ---------------------------------------------------------------------
+    // -------------------------- Motion state ------------------------------
+    private static final int IDLE = 0, FOLLOW_PATH = 1, TURN = 2;
+    private int mode = IDLE;
+    private Path activePath;
+    private double pathProgress;
+    private double targetHeading;
 
     @Override
     public void runOpMode() {
-
         initializeHardware();
         initializeOdometry();
 
-        telemetry.addLine("BillyDrive initialized");
-        telemetry.addLine("GoTo + Bezier use one shared moveKp");
-        telemetry.addData("Initial moveKp", moveKp);
-        telemetry.addData("Initial turnKp", turnKp);
-        telemetry.addLine("Place robot in a clear test area.");
-        telemetry.addLine("Auto tuning moves the robot automatically.");
-        telemetry.update();
+        while (!isStarted() && !isStopRequested()) {
+            if (gamepad1.dpad_up) selectedTuningMode = TuningMode.MOVE_KP;
+            else if (gamepad1.dpad_down) selectedTuningMode = TuningMode.TURN_KP;
+            else if (gamepad1.dpad_right) selectedTuningMode = TuningMode.ENCODER_OFFSETS;
+
+            telemetry.addLine("BILLYDRIVE - SELECT TUNING");
+            telemetry.addLine("DPAD UP: Path/Move Kp (GoTo + Bezier)");
+            telemetry.addLine("DPAD DOWN: Turn Kp");
+            telemetry.addLine("DPAD RIGHT: Encoder offsets");
+            telemetry.addData("Selected", selectedTuningMode);
+            telemetry.addLine("Place robot in a clear area before PLAY.");
+            telemetry.update();
+            sleep(80);
+        }
 
         waitForStart();
-
         if (!opModeIsActive()) {
             stopDrive();
             return;
         }
 
-        // This OpMode is dedicated to automatic controller tuning.
-        runAutoKpTuning();
+        switch (selectedTuningMode) {
+            case MOVE_KP: runMoveKpTuning(); break;
+            case TURN_KP: runTurnKpTuning(); break;
+            case ENCODER_OFFSETS: runEncoderOffsetCalibration(); break;
+        }
 
         stopDrive();
-        mode = IDLE;
     }
 
     private void initializeHardware() {
@@ -210,15 +147,12 @@ public class BillyDrive extends LinearOpMode {
         leftBack = hardwareMap.get(DcMotor.class, LB_NAME);
         rightBack = hardwareMap.get(DcMotor.class, RB_NAME);
 
-        // These DcMotor objects expose the encoder input ports where the two
-        // independent tracking-wheel encoders are connected. The motor outputs
-        // remain the drivetrain motors; encoder values come from the dead wheels.
-        odoVertical = hardwareMap.get(DcMotor.class, ODO_VERTICAL_NAME);
-        odoHorizontal = hardwareMap.get(DcMotor.class, ODO_HORIZONTAL_NAME);
+        // Separate passive odometry encoders share the Hub port objects.
+        odoVertical = rightFront;
+        odoHorizontal = leftBack;
 
         leftFront.setDirection(DcMotorSimple.Direction.REVERSE);
         leftBack.setDirection(DcMotorSimple.Direction.REVERSE);
-
         leftFront.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         rightFront.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
         leftBack.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
@@ -230,849 +164,514 @@ public class BillyDrive extends LinearOpMode {
         odoHorizontal.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
 
         imu = hardwareMap.get(IMU.class, "imu");
-        imu.initialize(new IMU.Parameters(
-                new RevHubOrientationOnRobot(
-                        RevHubOrientationOnRobot.LogoFacingDirection.RIGHT,
-                        RevHubOrientationOnRobot.UsbFacingDirection.UP
-                )
-        ));
+        imu.initialize(new IMU.Parameters(new RevHubOrientationOnRobot(
+                RevHubOrientationOnRobot.LogoFacingDirection.RIGHT,
+                RevHubOrientationOnRobot.UsbFacingDirection.UP)));
         imu.resetYaw();
     }
 
     private void initializeOdometry() {
-        x = 0.0;
-        y = 0.0;
-
+        x = 0;
+        y = 0;
         lastVerticalTicks = odoVertical.getCurrentPosition();
         lastHorizontalTicks = odoHorizontal.getCurrentPosition();
         lastYaw = getHeading();
-        headingUnwrapped = lastYaw;
-        turnTargetUnwrapped = headingUnwrapped;
     }
 
-    // ---------------------------------------------------------------------
-    // ODOMETRY UPDATE
-    // ---------------------------------------------------------------------
-
+    // -------------------------- Two-wheel odometry ------------------------
     private void updateLocation() {
-        double verticalTicks = odoVertical.getCurrentPosition();
-        double horizontalTicks = odoHorizontal.getCurrentPosition();
+        double vTicks = odoVertical.getCurrentPosition();
+        double hTicks = odoHorizontal.getCurrentPosition();
 
-        double robotDx = (verticalTicks - lastVerticalTicks)
+        double forward = (vTicks - lastVerticalTicks)
                 * mmPerTick * VERTICAL_ENCODER_SIGN;
-        double robotDy = (horizontalTicks - lastHorizontalTicks)
+        double right = (hTicks - lastHorizontalTicks)
                 * mmPerTick * HORIZONTAL_ENCODER_SIGN;
-
-        lastVerticalTicks = verticalTicks;
-        lastHorizontalTicks = horizontalTicks;
+        lastVerticalTicks = vTicks;
+        lastHorizontalTicks = hTicks;
 
         double yaw = getHeading();
-        double deltaYaw = normalizeAngle(yaw - lastYaw);
+        double dYaw = normalizeAngle(yaw - lastYaw);
         lastYaw = yaw;
 
-        // Accumulate the wrapped IMU delta into a continuous heading.
-        // This prevents turn error from flipping sign at the +/-180 boundary.
-        headingUnwrapped += deltaYaw;
+        // Pod rotational travel compensation. Confirm signs by spin test.
+        forward -= yOffsetEncoder * dYaw;
+        right += xOffsetEncoder * dYaw;
 
-        // Remove encoder movement caused only by the pods rotating around
-        // the robot center.
-        robotDx -= verticalXOffset * deltaYaw;
-        robotDy -= horizontalYOffset * deltaYaw;
-
-        // Convert robot-relative displacement into field-relative movement.
-        double fieldDx = robotDx * Math.cos(yaw) - robotDy * Math.sin(yaw);
-        double fieldDy = robotDx * Math.sin(yaw) + robotDy * Math.cos(yaw);
-
-        x += fieldDx;
-        y += fieldDy;
+        // Robot-local forward/right -> field X/Y.
+        double c = Math.cos(yaw), s = Math.sin(yaw);
+        x += forward * c + right * s;
+        y += -forward * s + right * c;
     }
 
-    // ---------------------------------------------------------------------
-    // PUBLIC MOVEMENT COMMANDS
-    // ---------------------------------------------------------------------
-
+    // -------------------------- Public path API ---------------------------
+    /** Move to a field point using a straight-line path. */
     public void GoTo(double targetX, double targetY) {
-        this.targetX = targetX;
-        this.targetY = targetY;
-        currentPath = null;
-        mode = GOTO;
+        followPath(Path.line(new Vector2(x, y), new Vector2(targetX, targetY)));
     }
 
-    public void followPath(BezierCurve path) {
-        if (path == null) {
+    /** Follow a quadratic Bezier path with one control point. */
+    public void followBezier(double controlX, double controlY,
+                             double endX, double endY) {
+        followPath(Path.quadratic(new Vector2(x, y),
+                new Vector2(controlX, controlY), new Vector2(endX, endY)));
+    }
+
+    /** Follow a cubic Bezier path. */
+    public void followBezier(Vector2 control1, Vector2 control2, Vector2 end) {
+        followPath(Path.cubic(new Vector2(x, y), control1, control2, end));
+    }
+
+    /** Follow a prebuilt path. Robot heading is held at its starting angle. */
+    public void followPath(Path path) {
+        if (path == null || path.length() < 1.0) {
             stopDrive();
             mode = IDLE;
-            currentPath = null;
+            activePath = null;
             return;
         }
-
-        currentPath = path;
-        bezierProgress = 0.0;
-        mode = BEZIER;
+        activePath = path;
+        pathProgress = 0.0;
+        targetHeading = getHeading();
+        previousHeadingError = 0.0;
+        headingTimer.reset();
+        mode = FOLLOW_PATH;
     }
 
+    /** Existing public turn API, in degrees. */
     public void TurnTo(double angleDegrees) {
-        updateLocation();
-        setTurnTargetWrapped(Math.toRadians(angleDegrees));
-        currentPath = null;
+        targetHeading = normalizeAngle(Math.toRadians(angleDegrees));
+        activePath = null;
         mode = TURN;
     }
 
     /**
-     * Sets a wrapped field heading, but stores the equivalent target on the
-     * continuous heading axis. The selected direction is fixed for this turn,
-     * even if the IMU yaw crosses +180/-180 degrees.
+     * Blocking update loop. Call after GoTo/followPath/TurnTo.
+     * The loop updates odometry and the follower at the FTC control rate.
      */
-    private void setTurnTargetWrapped(double requestedHeading) {
-        double currentWrappedHeading = getHeading();
-        targetHeading = normalizeAngle(requestedHeading);
-
-        double shortestDelta = normalizeAngle(
-                targetHeading - currentWrappedHeading
-        );
-
-        turnTargetUnwrapped = headingUnwrapped + shortestDelta;
-    }
-
-    // ---------------------------------------------------------------------
-    // MAIN CONTROLLER UPDATE
-    // ---------------------------------------------------------------------
-
-    private void updateRunning() {
-        if (GOTO.equals(mode)) {
-            updateGoTo();
-        } else if (BEZIER.equals(mode)) {
-            updateBezier();
-        } else if (TURN.equals(mode)) {
-            updateTurn();
-        } else {
-            stopDrive();
+    public void waitForMotionComplete() {
+        while (opModeIsActive() && mode != IDLE) {
+            updateLocation();
+            updateMotion();
+            telemetry.addData("Follower", mode == FOLLOW_PATH ? "PATH" : "TURN");
+            telemetry.addData("Pose X/Y", "%.1f / %.1f", x, y);
+            telemetry.addData("Heading", "%.1f deg", Math.toDegrees(getHeading()));
+            telemetry.update();
+            idle();
         }
+        stopDrive();
     }
 
-    private void updateGoTo() {
-        double errorX = targetX - x;
-        double errorY = targetY - y;
-        double distance = Math.hypot(errorX, errorY);
+    private void updateMotion() {
+        if (mode == FOLLOW_PATH) updatePathFollower();
+        else if (mode == TURN) updateTurn();
+        else stopDrive();
+    }
 
-        if (distance <= endTolerance) {
+    // -------------------------- Path follower -----------------------------
+    private void updatePathFollower() {
+        if (activePath == null) {
             stopDrive();
             mode = IDLE;
             return;
         }
 
-        // Shared movement P controller.
-        double fieldX = moveKp * errorX;
-        double fieldY = moveKp * errorY;
+        Vector2 robot = new Vector2(x, y);
+        pathProgress = Math.max(pathProgress, activePath.closestProgress(robot, pathProgress));
+        double remaining = Math.max(0.0, activePath.length() - pathProgress);
+        Vector2 endError = activePath.end().minus(robot);
+        double endDistance = endError.norm();
 
-        double magnitude = Math.hypot(fieldX, fieldY);
-        if (magnitude > moveMaxPower) {
-            double scale = moveMaxPower / magnitude;
-            fieldX *= scale;
-            fieldY *= scale;
+        // A trapezoidal-style profile expressed as a safe velocity envelope.
+        // sqrt(2*a*d) guarantees a deceleration envelope near the endpoint.
+        double desiredVelocity = Math.min(maxPathVelocity,
+                Math.sqrt(Math.max(0.0, 2.0 * maxPathAcceleration * remaining)));
+        double distanceFromStart = pathProgress;
+        desiredVelocity = Math.min(desiredVelocity,
+                Math.sqrt(Math.max(0.0, 2.0 * maxPathAcceleration * distanceFromStart)));
+
+        Vector2 lookahead = activePath.pointAtDistance(
+                Math.min(activePath.length(), pathProgress + lookaheadDistance));
+        Vector2 toLookahead = lookahead.minus(robot);
+        Vector2 tangent = activePath.tangentAtDistance(pathProgress);
+
+        // Feedforward along the path plus feedback toward the lookahead point.
+        Vector2 command = tangent.times(desiredVelocity * pathVelocityK)
+                .plus(toLookahead.times(moveKp));
+
+        // Close the final endpoint with position feedback, without orbiting
+        // around the endpoint when the lookahead point is behind the robot.
+        if (remaining < lookaheadDistance * 0.65 || endDistance < pathEndTolerance * 2.0) {
+            Vector2 finalCommand = endError.times(moveKp);
+            double finalCap = Math.min(moveMaxPower,
+                    Math.max(0.08, desiredVelocity * pathVelocityK));
+            command = limitVector(finalCommand, finalCap);
         }
 
-        fieldToRobot(fieldX, fieldY);
+        command = limitVector(command, moveMaxPower);
+        double headingCorrection = headingHoldCorrection();
+        fieldToRobot(command.x, command.y, headingCorrection);
 
-        telemetry.addData("Mode", GOTO);
-        telemetry.addData("moveKp (shared)", moveKp);
-        telemetry.addData("Target X", targetX);
-        telemetry.addData("Target Y", targetY);
-        telemetry.addData("X", x);
-        telemetry.addData("Y", y);
-        telemetry.addData("Distance error", distance);
-        telemetry.addData("Movement power", Math.min(magnitude, moveMaxPower));
+        double estimatedSpeedCommand = command.norm();
+        telemetry.addData("Path progress", "%.1f / %.1f mm", pathProgress, activePath.length());
+        telemetry.addData("Remaining", remaining);
+        telemetry.addData("Endpoint error", endDistance);
+        telemetry.addData("Command magnitude", estimatedSpeedCommand);
+
+        if (endDistance <= pathEndTolerance && remaining <= pathEndTolerance * 1.5) {
+            stopDrive();
+            activePath = null;
+            mode = IDLE;
+        }
     }
 
-    private void updateBezier() {
-        if (currentPath == null) {
-            stopDrive();
-            mode = IDLE;
-            return;
-        }
-
-        double closestT = findClosestT(currentPath, bezierProgress);
-        bezierProgress = Math.max(bezierProgress, closestT);
-
-        double targetT = Math.min(1.0, bezierProgress + bezierLookaheadT);
-        Point targetPoint = currentPath.getPoint(targetT);
-
-        double errorX = targetPoint.x - x;
-        double errorY = targetPoint.y - y;
-        double lookaheadError = Math.hypot(errorX, errorY);
-
-        // Same shared movement P controller used by GoTo.
-        double fieldX = moveKp * errorX;
-        double fieldY = moveKp * errorY;
-
-        double magnitude = Math.hypot(fieldX, fieldY);
-        if (magnitude > moveMaxPower) {
-            double scale = moveMaxPower / magnitude;
-            fieldX *= scale;
-            fieldY *= scale;
-        }
-
-        double endError = Math.hypot(currentPath.end.x - x,
-                currentPath.end.y - y);
-
-        // At the end of the curve, aim directly at the endpoint.
-        if (bezierProgress >= 0.98) {
-            double endX = currentPath.end.x - x;
-            double endY = currentPath.end.y - y;
-
-            fieldX = moveKp * endX;
-            fieldY = moveKp * endY;
-
-            magnitude = Math.hypot(fieldX, fieldY);
-            if (magnitude > moveMaxPower) {
-                double scale = moveMaxPower / magnitude;
-                fieldX *= scale;
-                fieldY *= scale;
-            }
-        }
-
-        if (bezierProgress >= 0.98 && endError <= endTolerance) {
-            stopDrive();
-            currentPath = null;
-            mode = IDLE;
-            return;
-        }
-
-        fieldToRobot(fieldX, fieldY);
-
-        telemetry.addData("Mode", BEZIER);
-        telemetry.addData("moveKp (shared)", moveKp);
-        telemetry.addData("Path t", bezierProgress);
-        telemetry.addData("Lookahead t", targetT);
-        telemetry.addData("Lookahead error", lookaheadError);
-        telemetry.addData("Endpoint error", endError);
-        telemetry.addData("Movement power", Math.min(magnitude, moveMaxPower));
+    private double headingHoldCorrection() {
+        double dt = Math.max(0.005, headingTimer.seconds());
+        double error = normalizeAngle(targetHeading - getHeading());
+        double derivative = normalizeAngle(error - previousHeadingError) / dt;
+        previousHeadingError = error;
+        headingTimer.reset();
+        return clamp(headingHoldKp * error + headingHoldKd * derivative,
+                -headingHoldMaxPower, headingHoldMaxPower);
     }
 
     private void updateTurn() {
-        // Raw IMU convention on this robot: CCW rotation produces negative yaw.
-        // Keep target and measured heading in that same convention. Do not
-        // normalize this continuous error every loop; doing so can reverse
-        // the selected direction when crossing the +/-180 degree boundary.
-        double error = turnTargetUnwrapped - headingUnwrapped;
-        double absError = Math.abs(error);
-
-        if (absError <= turnTolerance) {
+        // Preserve the existing BillyDrive TurnTo error convention.
+        double error = normalizeAngle(targetHeading + getHeading());
+        if (Math.abs(error) <= turnTolerance) {
             stopDrive();
             mode = IDLE;
             return;
         }
-
-        double turn = TURN_OUTPUT_SIGN * turnKp * error;
-        turn = clamp(turn, -turnMaxPower, turnMaxPower);
-
-        // Minimum power to overcome static friction.
-        if (Math.abs(turn) < turnMinPower) {
-            turn = Math.copySign(turnMinPower, error);
-        }
-
-        drivePower(0.0, 0.0, turn);
-
-        telemetry.addData("Mode", TURN);
-        telemetry.addData("turnKp", turnKp);
-        telemetry.addData("Target heading", Math.toDegrees(targetHeading));
-        telemetry.addData("Current heading (IMU)", Math.toDegrees(getHeading()));
-        telemetry.addData("Continuous heading", Math.toDegrees(headingUnwrapped));
-        telemetry.addData("Turn target (continuous)",
-                Math.toDegrees(turnTargetUnwrapped));
-        telemetry.addData("Heading error", Math.toDegrees(error));
-        telemetry.addData("Raw IMU yaw", Math.toDegrees(getHeading()));
-        telemetry.addData("Heading accumulator", Math.toDegrees(headingUnwrapped));
-        telemetry.addData("Turn power", turn);
-        telemetry.addData("Turn output sign", TURN_OUTPUT_SIGN);
+        double turn = clamp(turnKp * error, -turnMaxPower, turnMaxPower);
+        if (Math.abs(turn) < turnMinPower) turn = Math.copySign(turnMinPower, error);
+        drivePower(0, 0, turn);
     }
 
-    // ---------------------------------------------------------------------
-    // BEZIER MATH
-    // ---------------------------------------------------------------------
-
-    private double findClosestT(BezierCurve path, double minimumT) {
-        double bestT = minimumT;
-        double bestDistanceSquared = Double.MAX_VALUE;
-
-        // Search only forward from the previous progress to avoid jumping
-        // backwards to another nearby section of the curve.
-        double startT = Math.max(0.0, minimumT - 0.02);
-
-        for (double t = startT; t <= 1.000001; t += 0.005) {
-            Point p = path.getPoint(Math.min(1.0, t));
-            double dx = p.x - x;
-            double dy = p.y - y;
-            double distanceSquared = dx * dx + dy * dy;
-
-            if (distanceSquared < bestDistanceSquared) {
-                bestDistanceSquared = distanceSquared;
-                bestT = t;
-            }
-        }
-
-        return clamp(bestT, 0.0, 1.0);
-    }
-
-    // ---------------------------------------------------------------------
-    // AUTOMATIC TUNING: SHARED MOVE KP
-    // ---------------------------------------------------------------------
-
-    /**
-     * Each candidate is tested on BOTH GoTo and Bezier.
-     * The candidate score is the sum of both motion scores.
-     * Therefore one moveKp is selected for both movement modes.
-     */
-    private void runAutoKpTuning() {
+    // -------------------------- Auto tuning: shared Move Kp ---------------
+    private void runMoveKpTuning() {
         tuningCompleted = false;
         tuningFailed = false;
+        tuningStage = "Path follower Move Kp (GoTo + Bezier)";
         failureReason = "";
         lastTrialResult = "No trial completed";
-        tuningStage = "Initializing";
         totalTrials = 0;
-        movementTrialCount = 0;
-        turnTrialCount = 0;
+        bestMoveScore = Double.MAX_VALUE;
+        bestMoveKp = moveKp;
 
-        stopDrive();
-        mode = IDLE;
         updateLocation();
-
-        // Freeze one reference pose for every trial in this tuning session.
         tuningOriginX = x;
         tuningOriginY = y;
-        tuningOriginHeading = getHeading();
 
         telemetry.clear();
-        telemetry.addLine("===== SHARED MOVE KP AUTO TUNING =====");
-        telemetry.addLine("QUICK MODE: 2 candidates per controller.");
-        telemetry.addLine("NO RETURN between trials; tests alternate direction.");
-        telemetry.addLine("Safety radius from start: 300 mm.");
-        telemetry.addLine("GoTo and Bezier share one moveKp.");
-        telemetry.addData("Test distance (mm)", testDistance);
-        telemetry.addData("Move candidates per round", 2);
-        telemetry.addData("Turn candidates per round", 2);
-        telemetry.addData("Move search rounds", moveTuningRounds);
-        telemetry.addData("Turn search rounds", turnTuningRounds);
-        telemetry.addLine("Starting quick tuning...");
+        telemetry.addLine("PATH FOLLOWER MOVE KP TUNING");
+        telemetry.addLine("Tests: straight GoTo + curved Bezier");
+        telemetry.addLine("Keep robot in a clear area; press STOP to abort.");
         telemetry.update();
+        sleep(1500);
 
-        tuningStage = "Shared Move Kp (GoTo + Bezier)";
-        bestMoveKp = searchSharedMoveKp();
+        // A compact grid search; each candidate is evaluated on both path types.
+        final double[] candidates = {
+                moveKpMin,
+                moveKpMin + (moveKpMax - moveKpMin) * 0.25,
+                moveKpMin + (moveKpMax - moveKpMin) * 0.50,
+                moveKpMin + (moveKpMax - moveKpMin) * 0.75,
+                moveKpMax
+        };
 
-        if (tuningFailed || !opModeIsActive()) {
-            finishAutoTuning();
-            return;
-        }
-
-        moveKp = bestMoveKp;
-
-        // Turn tuning remains separate because it controls rotation.
-        tuningStage = "Turn Kp";
-        bestTurnKp = searchTurnKp();
-        if (tuningFailed || !opModeIsActive()) {
-            finishAutoTuning();
-            return;
-        }
-
-        turnKp = bestTurnKp;
-        tuningCompleted = true;
-
-        finishAutoTuning();
-    }
-
-    private double searchSharedMoveKp() {
-        double low = moveKpMin;
-        double high = moveKpMax;
-
-        double bestKp = moveKp;
-        double bestScore = Double.MAX_VALUE;
-
-        for (int round = 0; round < moveTuningRounds; round++) {
-            if (!opModeIsActive() || tuningFailed) {
-                break;
-            }
-
-            double mid = (low + high) / 2.0;
-            // Quick mode: only test the low and high ends of the range.
-            double[] candidates = {low, high};
-            double[] scores = {
-                    Double.MAX_VALUE,
-                    Double.MAX_VALUE
-            };
-
-            telemetry.addLine("===== SHARED MOVE KP SEARCH =====");
-            telemetry.addData("Round", round + 1);
-            telemetry.addData("Candidate count", candidates.length);
-            telemetry.addData("Low", low);
-            telemetry.addData("High", high);
-            telemetry.update();
-
-            for (int i = 0; i < candidates.length; i++) {
-                if (!opModeIsActive()) {
-                    break;
-                }
-
-                double candidate = candidates[i];
-
-                telemetry.addData("Candidate index", (i + 1) + "/" + candidates.length);
-                telemetry.addData("Current candidate Kp", candidate);
-                telemetry.addLine("Next test: GoTo");
-                telemetry.update();
-
-                // First test: GoTo.
-                double goToScore = evaluateMoveTrial(candidate, false);
-                if (tuningFailed || !opModeIsActive()) {
-                    break;
-                }
-
-                telemetry.addData("Candidate index", (i + 1) + "/" + candidates.length);
-                telemetry.addData("Current candidate Kp", candidate);
-                telemetry.addLine("Next test: Bezier");
-                telemetry.update();
-
-                // Second test: Bezier, with exactly the same candidate Kp.
-                double bezierScore = evaluateMoveTrial(candidate, true);
-                if (tuningFailed || !opModeIsActive()) {
-                    break;
-                }
-
-                // A timeout on one candidate is a bad score, not a fatal
-                // tuning error. Continue with the remaining Kp candidates.
-                scores[i] = (goToScore == Double.MAX_VALUE
-                        || bezierScore == Double.MAX_VALUE)
-                        ? Double.MAX_VALUE
-                        : goToScore + bezierScore;
-                totalTrials++;
-
-                telemetry.addData("Candidate moveKp", candidate);
-                telemetry.addData("GoTo score", goToScore);
-                telemetry.addData("Bezier score", bezierScore);
-                telemetry.addData("Combined score", scores[i]);
-                telemetry.update();
-
-                if (scores[i] < bestScore) {
-                    bestScore = scores[i];
-                    bestKp = candidate;
-                }
-            }
-
-            if (tuningFailed || !opModeIsActive()) {
-                break;
-            }
-
-            int bestIndex = 0;
-            for (int i = 1; i < scores.length; i++) {
-                if (scores[i] < scores[bestIndex]) {
-                    bestIndex = i;
-                }
-            }
-
-            if (scores[bestIndex] == Double.MAX_VALUE) {
+        for (int i = 0; i < candidates.length && opModeIsActive(); i++) {
+            double candidate = candidates[i];
+            double goScore = evaluatePathTrial(candidate, false);
+            if (!opModeIsActive() || tuningFailed) break;
+            if (!returnToTrialStart()) {
                 tuningFailed = true;
-                failureReason = "No valid shared moveKp candidate: both GoTo/Bezier "
-                        + "candidate pairs timed out or were rejected. Last result: "
-                        + lastTrialResult;
+                failureReason = "Could not return to trial start; tuning aborted for safety.";
                 break;
             }
 
-            // Coarse one-step refinement. The selected endpoint determines
-            // which half of the original range is retained.
-            if (bestIndex == 0) {
-                high = mid;
-            } else {
-                low = mid;
+            double curveScore = evaluatePathTrial(candidate, true);
+            if (!opModeIsActive() || tuningFailed) break;
+            if (!returnToTrialStart()) {
+                tuningFailed = true;
+                failureReason = "Could not return to trial start after Bezier; tuning aborted.";
+                break;
             }
 
-            telemetry.addData("Best shared moveKp", bestKp);
-            telemetry.addData("Best combined score", bestScore);
+            if (goScore == Double.MAX_VALUE || curveScore == Double.MAX_VALUE) continue;
+            double score = goScore + curveScore;
+            totalTrials += 2;
+            if (score < bestMoveScore) {
+                bestMoveScore = score;
+                bestMoveKp = candidate;
+            }
+
+            telemetry.addData("Candidate", candidate);
+            telemetry.addData("GoTo score", goScore);
+            telemetry.addData("Bezier score", curveScore);
+            telemetry.addData("Best Kp", bestMoveKp);
             telemetry.update();
         }
 
-        if (bestScore == Double.MAX_VALUE) {
+        if (!tuningFailed && bestMoveScore < Double.MAX_VALUE && opModeIsActive()) {
+            moveKp = bestMoveKp;
+            tuningCompleted = true;
+        } else if (!tuningFailed) {
             tuningFailed = true;
-            if (failureReason.isEmpty()) {
-                failureReason = "Shared movement tuning produced no valid candidate. "
-                        + lastTrialResult;
-            }
+            failureReason = "No candidate completed both path tests.";
         }
-
-        return bestKp;
+        finishTuning();
     }
 
-    /**
-     * Runs one translational test and returns the robot to the original pose.
-     * Returns Double.MAX_VALUE if the trial or return movement fails.
-     */
-    private double evaluateMoveTrial(double candidateKp, boolean useBezier) {
-        // Each test begins at the robot's current measured pose. No return
-        // movement is performed between candidates.
+    private double evaluatePathTrial(double candidateKp, boolean curved) {
         updateLocation();
-        final double startX = x;
-        final double startY = y;
-
-        // Alternate direction to limit cumulative drift across trials.
-        final double direction = (movementTrialCount % 2 == 0) ? 1.0 : -1.0;
-        final double curveSide = ((movementTrialCount / 2) % 2 == 0) ? 1.0 : -1.0;
-        movementTrialCount++;
-
+        double sx = x, sy = y;
         moveKp = candidateKp;
-        final double targetX = startX + direction * testDistance;
-        final double targetY = startY;
 
-        if (useBezier) {
-            BezierCurve path = new BezierCurve(
-                    new Point(startX, startY),
-                    new Point(
-                            startX + direction * testDistance * 0.5,
-                            startY + curveSide * testDistance * 0.5
-                    ),
-                    new Point(targetX, targetY)
-            );
-            followPath(path);
+        Path testPath;
+        if (!curved) {
+            testPath = Path.line(new Vector2(sx, sy),
+                    new Vector2(sx + testDistance, sy));
         } else {
-            GoTo(targetX, targetY);
+            testPath = Path.quadratic(new Vector2(sx, sy),
+                    new Vector2(sx + testDistance * 0.50, sy + 65.0),
+                    new Vector2(sx + testDistance, sy));
         }
 
+        followPath(testPath);
         ElapsedTime timer = new ElapsedTime();
-        double maxOvershoot = 0.0;
-        double accumulatedPathError = 0.0;
-        int pathErrorSamples = 0;
-        boolean safetyLimitReached = false;
+        double maxDisplacement = 0.0;
 
-        while (opModeIsActive()
-                && !IDLE.equals(mode)
-                && timer.seconds() < moveTrialTimeout) {
-
+        while (opModeIsActive() && mode != IDLE && timer.seconds() < moveTrialTimeout) {
             updateLocation();
+            double displacement = Math.hypot(x - sx, y - sy);
+            maxDisplacement = Math.max(maxDisplacement, displacement);
 
-            double displacementFromStart = Math.hypot(
-                    x - tuningOriginX,
-                    y - tuningOriginY
-            );
-
-            if (displacementFromStart > maxTuningRadius) {
-                safetyLimitReached = true;
+            if (displacement > maxTrialDisplacement) {
                 stopDrive();
                 mode = IDLE;
-                currentPath = null;
-                failureReason = "Safety radius exceeded during "
-                        + (useBezier ? "Bezier" : "GoTo")
-                        + ": displacement=" + displacementFromStart
-                        + "mm, limit=" + maxTuningRadius + "mm. "
-                        + "Move robot to a safe central position and restart.";
-                break;
+                activePath = null;
+                tuningFailed = true;
+                failureReason = "Trial safety stop: robot moved " + displacement
+                        + " mm from its start (limit " + maxTrialDisplacement + " mm).";
+                lastTrialResult = failureReason;
+                return Double.MAX_VALUE;
             }
 
-            if (!useBezier) {
-                double progress = (x - startX) * direction;
-                maxOvershoot = Math.max(
-                        maxOvershoot,
-                        Math.max(0.0, progress - testDistance)
-                );
-            } else if (currentPath != null) {
-                double nearestT = findClosestT(currentPath, bezierProgress);
-                Point nearestPoint = currentPath.getPoint(nearestT);
-                double crossTrackError = Math.hypot(
-                        nearestPoint.x - x,
-                        nearestPoint.y - y
-                );
-                accumulatedPathError += crossTrackError;
-                pathErrorSamples++;
-            }
-
-            updateRunning();
-
-            telemetry.addData("Auto tuning", useBezier ? "Bezier" : "GoTo");
-            telemetry.addData("Candidate moveKp", candidateKp);
-            telemetry.addData("Direction", direction > 0 ? "Forward" : "Backward");
-            telemetry.addData("Elapsed", timer.seconds());
-            telemetry.addData("X / Y", "%.1f / %.1f", x, y);
-            telemetry.addData("Distance from tuning start", displacementFromStart);
-            telemetry.addData("Safety radius", maxTuningRadius);
-            telemetry.addLine("Return-to-origin: DISABLED");
+            updateMotion();
+            telemetry.addData("Auto tuning", curved ? "Bezier path" : "GoTo line");
+            telemetry.addData("Candidate Kp", candidateKp);
+            telemetry.addData("Pose", "%.1f / %.1f", x, y);
+            telemetry.addData("Elapsed", "%.2f s", timer.seconds());
+            telemetry.addData("Distance from trial start", displacement);
             telemetry.update();
             idle();
         }
 
-        boolean completed = opModeIsActive() && IDLE.equals(mode);
+        boolean completed = opModeIsActive() && mode == IDLE;
         double elapsed = timer.seconds();
-        double finalError = Math.hypot(targetX - x, targetY - y);
-
+        double endpointError = Math.hypot(testPath.end().x - x, testPath.end().y - y);
         stopDrive();
         mode = IDLE;
-        currentPath = null;
-
-        if (safetyLimitReached) {
-            tuningFailed = true;
-            lastTrialResult = "Safety radius exceeded during "
-                    + (useBezier ? "Bezier" : "GoTo")
-                    + ", moveKp=" + candidateKp;
-            return Double.MAX_VALUE;
-        }
+        activePath = null;
 
         if (!completed) {
-            lastTrialResult = (useBezier ? "Bezier" : "GoTo")
-                    + " timed out at moveKp=" + candidateKp
-                    + ", elapsed=" + elapsed
-                    + "s, endpointError=" + finalError + "mm";
-            telemetry.addLine("Candidate timed out; rejecting this Kp.");
-            telemetry.addData("Test type", useBezier ? "Bezier" : "GoTo");
-            telemetry.addData("Candidate Kp", candidateKp);
-            telemetry.addData("Elapsed", elapsed);
-            telemetry.addData("Final error (mm)", finalError);
-            telemetry.addLine("No return performed; next trial starts at current pose.");
-            telemetry.update();
+            lastTrialResult = (curved ? "Bezier" : "GoTo")
+                    + " timeout; endpoint error=" + endpointError + " mm";
             return Double.MAX_VALUE;
         }
 
-        double trackingPenalty;
-        if (useBezier) {
-            double averagePathError = pathErrorSamples == 0
-                    ? finalError
-                    : accumulatedPathError / pathErrorSamples;
-            trackingPenalty = averagePathError * 0.02;
-        } else {
-            trackingPenalty = maxOvershoot * 0.03;
-        }
-
-        double score = elapsed + finalError * 0.02 + trackingPenalty;
-        lastTrialResult = (useBezier ? "Bezier" : "GoTo")
-                + " completed at moveKp=" + candidateKp
-                + ", elapsed=" + elapsed + "s, score=" + score
-                + ", endpointError=" + finalError + "mm";
-
-        totalTrials++;
+        double score = elapsed + endpointError * 0.025;
+        lastTrialResult = (curved ? "Bezier" : "GoTo") + " completed; Kp="
+                + candidateKp + ", time=" + elapsed + "s, error="
+                + endpointError + "mm, score=" + score;
         return score;
     }
 
-    // ---------------------------------------------------------------------
-    // AUTOMATIC TUNING: TURN KP
-    // ---------------------------------------------------------------------
+    /** Return to the position at the start of the preceding tuning trial. */
+    private boolean returnToTrialStart() {
+        updateLocation();
+        // The trial's expected endpoint is behind/ahead along the X axis.
+        // Use a conservative direct line to the fixed tuning origin for safety.
+        double dx = tuningOriginX - x;
+        double dy = tuningOriginY - y;
+        if (Math.hypot(dx, dy) < pathEndTolerance) return true;
 
-    private double searchTurnKp() {
-        double low = turnKpMin;
-        double high = turnKpMax;
-
-        // Zero means no candidate has passed yet; do not report the old
-        // default turnKp as if it had been successfully tuned.
-        double bestKp = 0.0;
-        double bestScore = Double.MAX_VALUE;
-
-        for (int round = 0; round < turnTuningRounds; round++) {
-            if (!opModeIsActive() || tuningFailed) {
-                break;
+        double savedKp = moveKp;
+        moveKp = Math.min(savedKp, 0.0012);
+        followPath(Path.line(new Vector2(x, y), new Vector2(tuningOriginX, tuningOriginY)));
+        ElapsedTime timer = new ElapsedTime();
+        while (opModeIsActive() && mode != IDLE && timer.seconds() < returnTimeout) {
+            updateLocation();
+            if (Math.hypot(x - tuningOriginX, y - tuningOriginY) > maxTrialDisplacement) {
+                stopDrive();
+                mode = IDLE;
+                activePath = null;
+                moveKp = savedKp;
+                return false;
             }
-
-            double mid = (low + high) / 2.0;
-            // Quick mode: two candidates only; this is a coarse estimate.
-            double[] candidates = {low, high};
-            double[] scores = {
-                    Double.MAX_VALUE,
-                    Double.MAX_VALUE
-            };
-
-            for (int i = 0; i < candidates.length; i++) {
-                if (!opModeIsActive()) {
-                    break;
-                }
-
-                scores[i] = evaluateTurnTrial(candidates[i]);
-                if (tuningFailed) {
-                    break;
-                }
-
-                if (scores[i] < bestScore) {
-                    bestScore = scores[i];
-                    bestKp = candidates[i];
-                }
-            }
-
-            if (tuningFailed || !opModeIsActive()) {
-                break;
-            }
-
-            int bestIndex = 0;
-            for (int i = 1; i < scores.length; i++) {
-                if (scores[i] < scores[bestIndex]) {
-                    bestIndex = i;
-                }
-            }
-
-            if (scores[bestIndex] == Double.MAX_VALUE) {
-                tuningFailed = true;
-                failureReason = "No valid turnKp candidate: all TurnTo tests timed out "
-                        + "or were rejected. Last result: " + lastTrialResult;
-                break;
-            }
-
-            if (bestIndex == 0) {
-                high = mid;
-            } else {
-                low = mid;
-            }
-
-            telemetry.addData("Turn tuning round", round + 1);
-            telemetry.addData("Best turnKp", bestKp);
-            telemetry.addData("Best turn score", bestScore);
+            updateMotion();
+            telemetry.addLine("Returning to tuning origin...");
+            telemetry.addData("Return error", Math.hypot(x - tuningOriginX, y - tuningOriginY));
             telemetry.update();
+            idle();
         }
-
-        if (bestScore == Double.MAX_VALUE) {
-            tuningFailed = true;
-            if (failureReason.isEmpty()) {
-                failureReason = "Turn tuning produced no valid candidate. "
-                        + lastTrialResult;
-            }
-        }
-
-        return bestKp;
+        boolean ok = mode == IDLE && opModeIsActive()
+                && Math.hypot(x - tuningOriginX, y - tuningOriginY) < pathEndTolerance * 2.0;
+        stopDrive();
+        mode = IDLE;
+        activePath = null;
+        moveKp = savedKp;
+        return ok;
     }
 
-    private double evaluateTurnTrial(double candidateKp) {
-        updateLocation();
-        turnKp = candidateKp;
+    // -------------------------- Turn Kp tuning -----------------------------
+    private void runTurnKpTuning() {
+        tuningCompleted = false;
+        tuningFailed = false;
+        tuningStage = "Turn Kp";
+        totalTrials = 0;
+        double[] candidates = {0.08, 0.14, 0.20, 0.27, 0.34};
+        double bestScore = Double.MAX_VALUE;
+        double chosen = turnKp;
 
-        // Alternate turn direction. No counter-rotation is performed after
-        // each trial; the next trial starts from the current measured heading.
-        double direction = (turnTrialCount % 2 == 0) ? 1.0 : -1.0;
-        turnTrialCount++;
+        for (double candidate : candidates) {
+            if (!opModeIsActive()) break;
+            turnKp = candidate;
+            double score = evaluateTurnTrial(candidate);
+            if (score < bestScore) {
+                bestScore = score;
+                chosen = candidate;
+            }
+        }
+        if (bestScore < Double.MAX_VALUE && opModeIsActive()) {
+            turnKp = chosen;
+            tuningCompleted = true;
+        } else {
+            tuningFailed = true;
+            failureReason = "No TurnTo candidate completed.";
+        }
+        finishTuning();
+    }
 
-        double requestedTurn = direction * testTurnAngle;
-        targetHeading = normalizeAngle(getHeading() + requestedTurn);
-        turnTargetUnwrapped = headingUnwrapped + requestedTurn;
+    private double evaluateTurnTrial(double candidate) {
+        double start = getHeading();
+        targetHeading = normalizeAngle(start + Math.toRadians(45.0));
         mode = TURN;
+        ElapsedTime timer = new ElapsedTime();
+        while (opModeIsActive() && mode != IDLE && timer.seconds() < 6.0) {
+            updateLocation();
+            updateTurn();
+            telemetry.addData("Turn Kp candidate", candidate);
+            telemetry.addData("Heading", Math.toDegrees(getHeading()));
+            telemetry.update();
+            idle();
+        }
+        double error = Math.abs(normalizeAngle(targetHeading + getHeading()));
+        boolean done = mode == IDLE;
+        stopDrive();
+        mode = IDLE;
+        if (!done) return Double.MAX_VALUE;
+        totalTrials++;
+        return timer.seconds() + Math.toDegrees(error) * 0.05;
+    }
 
+    // -------------------------- Encoder offset calibration ----------------
+    private void runEncoderOffsetCalibration() {
+        tuningCompleted = false;
+        tuningFailed = false;
+        tuningStage = "Encoder offsets";
+        final double targetRadians = Math.toRadians(360);
+        final double power = 0.12;
+        final double timeout = 14.0;
+        int startV = odoVertical.getCurrentPosition();
+        int startH = odoHorizontal.getCurrentPosition();
+        double previousYaw = getHeading();
+        double accumulatedYaw = 0.0;
         ElapsedTime timer = new ElapsedTime();
 
-        while (opModeIsActive()
-                && !IDLE.equals(mode)
-                && timer.seconds() < turnTrialTimeout) {
-
-            updateLocation();
-            updateRunning();
-
-            telemetry.addData("Auto tuning", "TurnTo");
-            telemetry.addData("Candidate turnKp", candidateKp);
-            telemetry.addData("Direction",
-                    direction > 0 ? "Counter-clockwise" : "Clockwise");
-            telemetry.addData("Heading", Math.toDegrees(getHeading()));
-            telemetry.addData("Heading error (deg)",
-                    Math.toDegrees(turnTargetUnwrapped - headingUnwrapped));
-            telemetry.addLine("Return rotation: DISABLED");
+        while (opModeIsActive() && Math.abs(accumulatedYaw) < targetRadians
+                && timer.seconds() < timeout) {
+            double yaw = getHeading();
+            accumulatedYaw += normalizeAngle(yaw - previousYaw);
+            previousYaw = yaw;
+            drivePower(0, 0, power);
+            telemetry.addData("Offset calibration yaw", Math.toDegrees(accumulatedYaw));
             telemetry.update();
             idle();
         }
-
-        boolean completed = opModeIsActive() && IDLE.equals(mode);
-        double finalError = Math.abs(turnTargetUnwrapped - headingUnwrapped);
-        double elapsed = timer.seconds();
-
         stopDrive();
-        mode = IDLE;
 
-        if (!completed) {
-            lastTrialResult = "TurnTo timed out at turnKp=" + candidateKp
-                    + ", elapsed=" + elapsed + "s, finalError="
-                    + Math.toDegrees(finalError) + "deg";
-            telemetry.addLine("Turn candidate timed out; rejecting this Kp.");
-            telemetry.addData("Candidate turnKp", candidateKp);
-            telemetry.addData("Elapsed", elapsed);
-            telemetry.addData("Final error (deg)", Math.toDegrees(finalError));
-            telemetry.addLine("No return rotation performed.");
-            telemetry.update();
-            return Double.MAX_VALUE;
+        double vTravel = (odoVertical.getCurrentPosition() - startV)
+                * mmPerTick * VERTICAL_ENCODER_SIGN;
+        double hTravel = (odoHorizontal.getCurrentPosition() - startH)
+                * mmPerTick * HORIZONTAL_ENCODER_SIGN;
+
+        if (Math.abs(accumulatedYaw) < Math.toRadians(270) || timer.seconds() >= timeout) {
+            tuningFailed = true;
+            failureReason = "Rotation did not reach at least 270 degrees.";
+        } else {
+            double newX = vTravel / accumulatedYaw;
+            double newY = hTravel / accumulatedYaw;
+            if (Double.isFinite(newX) && Double.isFinite(newY)
+                    && Math.abs(newX) >= 5 && Math.abs(newX) <= 500
+                    && Math.abs(newY) >= 5 && Math.abs(newY) <= 500) {
+                xOffsetEncoder = newX;
+                yOffsetEncoder = newY;
+                tuningCompleted = true;
+            } else {
+                tuningFailed = true;
+                failureReason = "Calculated offsets out of range. Check encoder signs/scale.";
+            }
         }
 
-        double score = elapsed + Math.toDegrees(finalError) * 0.05;
-        lastTrialResult = "TurnTo completed at turnKp=" + candidateKp
-                + ", elapsed=" + elapsed + "s, score=" + score;
-
-        totalTrials++;
-        return score;
+        x = 0;
+        y = 0;
+        lastVerticalTicks = odoVertical.getCurrentPosition();
+        lastHorizontalTicks = odoHorizontal.getCurrentPosition();
+        lastYaw = getHeading();
+        finishTuning();
     }
 
-
-    // ---------------------------------------------------------------------
-    // FINISH TUNING
-    // ---------------------------------------------------------------------
-
-    private void finishAutoTuning() {
+    private void finishTuning() {
         stopDrive();
         mode = IDLE;
-        currentPath = null;
-
+        activePath = null;
         telemetry.clear();
-        telemetry.addLine("================================");
-        telemetry.addLine("       AUTO KP TUNING");
-        telemetry.addLine("================================");
-        telemetry.addData("Status",
-                tuningCompleted ? "COMPLETED" : "FAILED");
-        telemetry.addData("Failed stage", tuningStage);
-        if (!tuningCompleted) {
-            telemetry.addData("Failure reason",
-                    failureReason.isEmpty() ? "Unspecified failure (inspect last trial)"
-                            : failureReason);
-            telemetry.addData("Last trial", lastTrialResult);
-        }
-        telemetry.addLine("-------------------------------");
-        telemetry.addData("Shared GoTo + Bezier moveKp", moveKp);
-        telemetry.addData("TurnTo active turnKp", turnKp);
-        telemetry.addData("Best shared moveKp",
-                bestMoveKp > 0.0 ? bestMoveKp : "NOT FOUND");
-        telemetry.addData("Best turnKp",
-                bestTurnKp > 0.0 ? bestTurnKp : "NOT FOUND");
-        telemetry.addData("Total trials", totalTrials);
-        telemetry.addLine("Return-to-origin: DISABLED");
-        telemetry.addData("Final displacement from start (mm)",
-                Math.hypot(x - tuningOriginX, y - tuningOriginY));
-        telemetry.addLine("-------------------------------");
+        telemetry.addLine("========== BILLYDRIVE TUNING ==========");
+        telemetry.addData("Task", tuningStage);
+        telemetry.addData("Status", tuningCompleted ? "COMPLETED" : "FAILED");
+        if (tuningFailed) telemetry.addData("Failure", failureReason);
+        telemetry.addData("Last trial", lastTrialResult);
+        telemetry.addData("moveKp", moveKp);
+        telemetry.addData("turnKp", turnKp);
+        telemetry.addData("X offset", xOffsetEncoder);
+        telemetry.addData("Y offset", yOffsetEncoder);
+        telemetry.addData("Trials", totalTrials);
         telemetry.addLine("Robot stopped.");
         telemetry.update();
-
         while (opModeIsActive()) {
             stopDrive();
             idle();
         }
     }
 
-    // ---------------------------------------------------------------------
-    // MANUAL / TEST UTILITIES
-    // ---------------------------------------------------------------------
-
-    public void waitForMotionComplete() {
-        while (opModeIsActive() && !IDLE.equals(mode)) {
-            updateLocation();
-            updateRunning();
-
-            telemetry.addData("Mode", mode);
-            telemetry.addData("X", x);
-            telemetry.addData("Y", y);
-            telemetry.addData("Heading", Math.toDegrees(getHeading()));
-            telemetry.update();
-            idle();
-        }
-        stopDrive();
+    // -------------------------- Coordinate transforms ---------------------
+    private void fieldToRobot(double fieldX, double fieldY, double turn) {
+        double h = getHeading();
+        double c = Math.cos(h), s = Math.sin(h);
+        double forward = fieldX * c - fieldY * s;
+        double right = fieldX * s + fieldY * c;
+        drivePower(right, forward, turn);
     }
 
-    private void fieldToRobot(double fieldX, double fieldY) {
-        double yaw = getHeading();
-
-        double robotX = fieldX * Math.cos(yaw) + fieldY * Math.sin(yaw);
-        double robotY = -fieldX * Math.sin(yaw) + fieldY * Math.cos(yaw);
-
-        drivePower(robotX, robotY, 0.0);
-    }
-
+    /** xPower = right/strafe, yPower = forward. */
     private void drivePower(double xPower, double yPower, double turnPower) {
         double lf = yPower + xPower + turnPower;
         double rf = yPower - xPower - turnPower;
         double lb = yPower - xPower + turnPower;
         double rb = yPower + xPower - turnPower;
-
-        double max = Math.max(1.0,
-                Math.max(Math.max(Math.abs(lf), Math.abs(rf)),
-                        Math.max(Math.abs(lb), Math.abs(rb))));
-
+        double max = Math.max(1.0, Math.max(Math.max(Math.abs(lf), Math.abs(rf)),
+                Math.max(Math.abs(lb), Math.abs(rb))));
         leftFront.setPower(lf / max);
         rightFront.setPower(rf / max);
         leftBack.setPower(lb / max);
@@ -1080,74 +679,154 @@ public class BillyDrive extends LinearOpMode {
     }
 
     private void stopDrive() {
-        if (leftFront != null) leftFront.setPower(0.0);
-        if (rightFront != null) rightFront.setPower(0.0);
-        if (leftBack != null) leftBack.setPower(0.0);
-        if (rightBack != null) rightBack.setPower(0.0);
+        if (leftFront != null) leftFront.setPower(0);
+        if (rightFront != null) rightFront.setPower(0);
+        if (leftBack != null) leftBack.setPower(0);
+        if (rightBack != null) rightBack.setPower(0);
     }
 
     private double getHeading() {
         return imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
     }
 
-    private double normalizeAngle(double angle) {
+    private static double normalizeAngle(double angle) {
         return Math.atan2(Math.sin(angle), Math.cos(angle));
     }
 
-    private double clamp(double value, double min, double max) {
+    private static double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
     }
-}
 
-// -------------------------------------------------------------------------
-// SUPPORT CLASSES
-// -------------------------------------------------------------------------
-
-class Point {
-    final double x;
-    final double y;
-
-    Point(double x, double y) {
-        this.x = x;
-        this.y = y;
-    }
-}
-
-class BezierCurve {
-    final Point start;
-    final Point control;
-    final Point end;
-
-    BezierCurve(Point start, Point control, Point end) {
-        this.start = start;
-        this.control = control;
-        this.end = end;
+    private static Vector2 limitVector(Vector2 v, double max) {
+        double n = v.norm();
+        return n > max && n > 1e-9 ? v.times(max / n) : v;
     }
 
-    Point getPoint(double t) {
-        t = Math.max(0.0, Math.min(1.0, t));
-        double u = 1.0 - t;
+    // =====================================================================
+    // Nested geometry classes: kept in this same Java file.
+    // =====================================================================
 
-        double px = u * u * start.x
-                + 2.0 * u * t * control.x
-                + t * t * end.x;
-
-        double py = u * u * start.y
-                + 2.0 * u * t * control.y
-                + t * t * end.y;
-
-        return new Point(px, py);
+    public static class Vector2 {
+        public final double x, y;
+        public Vector2(double x, double y) { this.x = x; this.y = y; }
+        public Vector2 plus(Vector2 b) { return new Vector2(x + b.x, y + b.y); }
+        public Vector2 minus(Vector2 b) { return new Vector2(x - b.x, y - b.y); }
+        public Vector2 times(double k) { return new Vector2(x * k, y * k); }
+        public double dot(Vector2 b) { return x * b.x + y * b.y; }
+        public double norm() { return Math.hypot(x, y); }
+        public Vector2 normalized() {
+            double n = norm();
+            return n < 1e-9 ? new Vector2(0, 0) : times(1.0 / n);
+        }
+        public double distanceTo(Vector2 b) { return minus(b).norm(); }
     }
 
-    Point getDerivative(double t) {
-        t = Math.max(0.0, Math.min(1.0, t));
+    /**
+     * Arc-length sampled cubic Bezier path. Lines and quadratic curves are
+     * converted to cubic curves so the follower uses one consistent pipeline.
+     */
+    public static class Path {
+        private static final int SAMPLES = 160;
+        private final Vector2 p0, p1, p2, p3;
+        private final double[] sampleT = new double[SAMPLES + 1];
+        private final double[] sampleS = new double[SAMPLES + 1];
+        private final double totalLength;
 
-        double dx = 2.0 * (1.0 - t) * (control.x - start.x)
-                + 2.0 * t * (end.x - control.x);
+        private Path(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3) {
+            this.p0 = p0; this.p1 = p1; this.p2 = p2; this.p3 = p3;
+            sampleT[0] = 0;
+            sampleS[0] = 0;
+            Vector2 previous = point(0);
+            double length = 0;
+            for (int i = 1; i <= SAMPLES; i++) {
+                double t = (double) i / SAMPLES;
+                Vector2 current = point(t);
+                length += current.distanceTo(previous);
+                sampleT[i] = t;
+                sampleS[i] = length;
+                previous = current;
+            }
+            totalLength = length;
+        }
 
-        double dy = 2.0 * (1.0 - t) * (control.y - start.y)
-                + 2.0 * t * (end.y - control.y);
+        public static Path line(Vector2 start, Vector2 end) {
+            Vector2 delta = end.minus(start);
+            return new Path(start, start.plus(delta.times(1.0 / 3.0)),
+                    start.plus(delta.times(2.0 / 3.0)), end);
+        }
 
-        return new Point(dx, dy);
+        public static Path quadratic(Vector2 start, Vector2 control, Vector2 end) {
+            // Exact quadratic-to-cubic conversion.
+            Vector2 c1 = start.plus(control.minus(start).times(2.0 / 3.0));
+            Vector2 c2 = end.plus(control.minus(end).times(2.0 / 3.0));
+            return new Path(start, c1, c2, end);
+        }
+
+        public static Path cubic(Vector2 start, Vector2 c1, Vector2 c2, Vector2 end) {
+            return new Path(start, c1, c2, end);
+        }
+
+        public double length() { return totalLength; }
+        public Vector2 end() { return p3; }
+
+        public Vector2 point(double t) {
+            t = clamp(t, 0, 1);
+            double u = 1 - t;
+            return p0.times(u * u * u)
+                    .plus(p1.times(3 * u * u * t))
+                    .plus(p2.times(3 * u * t * t))
+                    .plus(p3.times(t * t * t));
+        }
+
+        public Vector2 derivative(double t) {
+            t = clamp(t, 0, 1);
+            double u = 1 - t;
+            return p1.minus(p0).times(3 * u * u)
+                    .plus(p2.minus(p1).times(6 * u * t))
+                    .plus(p3.minus(p2).times(3 * t * t));
+        }
+
+        public Vector2 tangentAtDistance(double distance) {
+            double t = tAtDistance(distance);
+            Vector2 tangent = derivative(t).normalized();
+            if (tangent.norm() < 1e-8) return p3.minus(p0).normalized();
+            return tangent;
+        }
+
+        public Vector2 pointAtDistance(double distance) {
+            return point(tAtDistance(distance));
+        }
+
+        private double tAtDistance(double distance) {
+            if (totalLength < 1e-9) return 1;
+            double s = clamp(distance, 0, totalLength);
+            int lo = 0, hi = SAMPLES;
+            while (lo < hi) {
+                int mid = (lo + hi) >>> 1;
+                if (sampleS[mid] < s) lo = mid + 1;
+                else hi = mid;
+            }
+            int i = Math.max(1, lo);
+            double s0 = sampleS[i - 1], s1 = sampleS[i];
+            double fraction = s1 - s0 < 1e-9 ? 0 : (s - s0) / (s1 - s0);
+            return sampleT[i - 1] + (sampleT[i] - sampleT[i - 1]) * fraction;
+        }
+
+        /** Find nearest point only at/after prior progress, avoiding backwards jumps. */
+        public double closestProgress(Vector2 robot, double minimumProgress) {
+            double minT = tAtDistance(minimumProgress);
+            int start = Math.max(0, (int) Math.floor(minT * SAMPLES) - 2);
+            double bestDistance = Double.MAX_VALUE;
+            double bestS = minimumProgress;
+            for (int i = start; i <= SAMPLES; i++) {
+                Vector2 p = point(sampleT[i]);
+                double d = p.distanceTo(robot);
+                if (d < bestDistance) {
+                    bestDistance = d;
+                    bestS = sampleS[i];
+                }
+            }
+            return Math.max(minimumProgress, bestS);
+        }
     }
 }
