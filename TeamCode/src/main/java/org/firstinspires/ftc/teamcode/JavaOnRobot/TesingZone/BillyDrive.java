@@ -1,130 +1,152 @@
 package org.firstinspires.ftc.teamcode.JavaOnRobot.TesingZone;
 
+import com.acmerobotics.dashboard.FtcDashboard;
+import com.acmerobotics.dashboard.config.Config;
+import com.acmerobotics.dashboard.telemetry.TelemetryPacket;
+import com.acmerobotics.dashboard.canvas.Canvas;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
-import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
- * BillyDrive - single-file FTC mecanum path follower.
+ * Manual PIDF tuning:
+ * Shared translational PIDF for GoTo, Bezier and Pose Hold.
+ * Separate Heading PIDF because heading uses radians, not millimeters.
  *
- * Architecture inspired by the ideas used in Road Runner / PedroPathing:
- * path geometry -> arc-length parameterization -> lookahead target ->
- * velocity profile -> feedforward + position feedback -> mecanum output.
- *
- * This is an original lightweight implementation, not a drop-in copy of
- * either library. Coordinates: field +X = robot forward at heading 0;
- * field +Y = robot right at heading 0; positive heading = CCW.
- *
- * HARDWARE:
- * m2=LF, m4=RF, m1=LB, m3=RB.
- * The independent vertical odometry pod is wired to m4's encoder input;
- * the independent horizontal pod is wired to m1's encoder input.
- * These are the existing Hub port objects, not extra hardwareMap names.
+ * Coordinates: +X forward, +Y right at heading 0, positive heading CCW.
+ * Hardware: m2 LF, m4 RF, m1 LB, m3 RB.
+ * Odometry: vertical encoder on m1, horizontal encoder on m4.
  */
-@TeleOp(name = "BillyDriveTest")
+@Config
+@Autonomous(name = "BillyDrive_PIDF_ManualTune")
 public class BillyDrive extends LinearOpMode {
 
-    // -------------------------- Hardware ---------------------------------
+    // Odometry
+    public static double MM_PER_TICK = 0.0502655;
+    public static double VERTICAL_SIGN = 1.0;
+    public static double HORIZONTAL_SIGN = 1.0;
+    public static double X_OFFSET_MM = 102.2281;
+    public static double Y_OFFSET_MM = 115.0326;
+
+    // Independent translational PIDF sets.
+    // X = forward/backward; Y = right/left.
+    public static double X_P = 0.0014;
+    public static double X_I = 0.0;
+    public static double X_D = 0.0;
+    public static double X_F = 0.00062;
+
+    public static double Y_P = 0.0014;
+    public static double Y_I = 0.0;
+    public static double Y_D = 0.0;
+    public static double Y_F = 0.00062;
+
+    // Separate heading PIDF.
+    public static double TURN_P = 0.9;
+    public static double TURN_I = 0.0;
+    public static double TURN_D = 0.04;
+    public static double TURN_F = 0.045;
+
+    // Test and motion limits
+    public static double TEST_DISTANCE_MM = 300.0;
+    public static double AXIS_TUNE_DISTANCE_MM = 300.0;
+    public static double AXIS_TUNE_TOLERANCE_MM = 15.0;
+    public static double AXIS_TUNE_SETTLE_SPEED_MM_S = 18.0;
+    public static double AXIS_TUNE_MAX_POWER = 0.18;
+    public static double TEST_TURN_DEG = 90.0;
+    public static double BEZIER_DISTANCE_MM = 500.0;
+    public static double BEZIER_SIDE_MM = 250.0;
+    public static double MAX_MOVE_POWER = 0.30;
+    public static double MAX_TURN_POWER = 0.22;
+    public static double MAX_VELOCITY_MM_S = 250.0;
+    public static double MAX_ACCEL_MM_S2 = 450.0;
+    public static double POSITION_TOLERANCE_MM = 12.0;
+    public static double HEADING_TOLERANCE_DEG = 2.0;
+    public static double SETTLE_VELOCITY_MM_S = 15.0;
+    public static double SETTLE_ANGULAR_VELOCITY_DEG_S = 8.0;
+    public static double TEST_TIMEOUT_S = 8.0;
+    public static double MANUAL_DRIVE_SCALE = 0.35;
+    public static double BEZIER_LOOKAHEAD_T = 0.10;
+    public static double BEZIER_END_TOLERANCE_MM = 18.0;
+
+    // Continuous ellipse loop for repeatable PID testing.
+    public static double LOOP_RADIUS_X_MM = 450.0;
+    public static double LOOP_RADIUS_Y_MM = 300.0;
+    public static int LOOP_WAYPOINTS = 24;
+    public static double LOOP_WAYPOINT_TOLERANCE_MM = 55.0;
+
+    // Dashboard drawing scale: values below 1 make the whole field view smaller.
+    public static double FIELD_DRAW_SCALE = 0.225;
+    public static double ROBOT_DRAW_RADIUS_MM = 90.0;
+
+    // Actual robot trajectory history (ring buffer).
+    private static final int ACTUAL_TRAIL_CAPACITY = 700;
+    private final double[] actualTrailX = new double[ACTUAL_TRAIL_CAPACITY];
+    private final double[] actualTrailY = new double[ACTUAL_TRAIL_CAPACITY];
+    private int actualTrailCount = 0;
+    private int actualTrailWriteIndex = 0;
+
+    public static double MOVE_INTEGRAL_LIMIT = 500.0;
+    public static double TURN_INTEGRAL_LIMIT = 1.0;
+
     private static final String LF_NAME = "m2";
     private static final String RF_NAME = "m4";
     private static final String LB_NAME = "m1";
     private static final String RB_NAME = "m3";
 
-    private DcMotor leftFront, rightFront, leftBack, rightBack;
+    private DcMotor lf, rf, lb, rb;
     private DcMotor odoVertical, odoHorizontal;
     private IMU imu;
+    private FtcDashboard dashboard;
 
-    // -------------------------- Odometry ----------------------------------
-    private double x, y;
-    private double mmPerTick = 0.0502655;
-    private double lastVerticalTicks, lastHorizontalTicks, lastYaw;
-    private double xOffsetEncoder = 102.2281;
-    private double yOffsetEncoder = 115.0326;
-    private static final double VERTICAL_ENCODER_SIGN = -1.0;
-    private static final double HORIZONTAL_ENCODER_SIGN = 1.0;
+    private double x, y, headingRad;
+    private double lastVerticalTicks, lastHorizontalTicks, lastRawYaw;
 
-    // -------------------------- Follower tuning --------------------------
-    // moveKp is shared by GoTo and all path types.
-    // Units: motor-power correction per millimetre of position error.
-    private double moveKp = 0.0018;
-    private double moveMaxPower = 0.48;
+    private enum Mode { MANUAL, GO_TO, BEZIER, LOOP, POSE_HOLD, TURN, TUNE_X, TUNE_Y }
+    private Mode mode = Mode.MANUAL;
 
-    // Path velocity profile / feedforward.
-    // Tune these only after odometry signs and scale are verified.
-    private double maxPathVelocity = 550.0;       // mm/s
-    private double maxPathAcceleration = 700.0;  // mm/s^2
-    private double pathVelocityK = 0.00062;      // power per mm/s
-    private double lookaheadDistance = 100.0;    // mm
-    private double pathEndTolerance = 18.0;       // mm
-    private double pathSettleVelocity = 35.0;     // mm/s
+    private double targetX, targetY, targetHeading;
+    private double integralX, integralY, turnIntegral;
+    private double previousX, previousY, previousHeading, previousTime;
+    private int settledSamples;
+    private final ElapsedTime timer = new ElapsedTime();
 
-    // Independent heading hold for translation/path following.
-    private double headingHoldKp = 0.90;
-    private double headingHoldKd = 0.035;
-    private double headingHoldMaxPower = 0.20;
-    private double headingHoldTarget;
-    private double previousHeadingError;
-    private final ElapsedTime headingTimer = new ElapsedTime();
+    // Cubic Bezier control points
+    private double p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y;
+    private double bezierT;
 
-    // TurnTo settings. Keep the user's existing TurnTo error convention.
-    private double turnKp = 0.3125;
-    private double turnMaxPower = 0.35;
-    private double turnMinPower = 0.06;
-    private double turnTolerance = Math.toRadians(2.5);
+    private double loopCenterX, loopCenterY;
+    private int loopIndex;
+    private double loopStartHeading;
+    private int axisTuneStep;
+    private int axisSettledSamples;
+    private double axisTuneCenterX, axisTuneCenterY;
 
-    // -------------------------- Auto tuning -------------------------------
-    private double moveKpMin = 0.0005;
-    private double moveKpMax = 0.0040;
-    private double testDistance = 220.0;
-    private double moveTrialTimeout = 7.0;
-    private double returnTimeout = 7.0;
-    private double maxTrialDisplacement = 420.0;
-    private double tuningOriginX, tuningOriginY;
-    private int totalTrials;
-    private double bestMoveKp;
-    private double bestMoveScore = Double.MAX_VALUE;
-    private boolean tuningCompleted, tuningFailed;
-    private String tuningStage = "Not started";
-    private String failureReason = "";
-    private String lastTrialResult = "No trial completed";
-
-    private enum TuningMode { MOVE_KP, TURN_KP, ENCODER_OFFSETS }
-    private TuningMode selectedTuningMode = TuningMode.MOVE_KP;
-
-    // -------------------------- Motion state ------------------------------
-    private static final int IDLE = 0, FOLLOW_PATH = 1, TURN = 2;
-    private int mode = IDLE;
-    private Path activePath;
+    // Time-parameterized reference point on the planned straight path.
+    private double axisPathStartX, axisPathStartY;
+    private double axisPathLength, axisPathUnitX, axisPathUnitY;
+    private double referenceX, referenceY;
+    private double referenceVelocity;
     private double pathProgress;
-    private double targetHeading;
+
+
+    private boolean lastA, lastB, lastX, lastY;
+    private boolean lastDpadLeft, lastDpadRight, lastDpadDown, lastRB, lastLB;
 
     @Override
     public void runOpMode() {
         initializeHardware();
-        initializeOdometry();
+        resetPose();
 
-        while (!isStarted() && !isStopRequested()) {
-            if (gamepad1.dpad_up) selectedTuningMode = TuningMode.MOVE_KP;
-            else if (gamepad1.dpad_down) selectedTuningMode = TuningMode.TURN_KP;
-            else if (gamepad1.dpad_right) selectedTuningMode = TuningMode.ENCODER_OFFSETS;
-
-            telemetry.addLine("BILLYDRIVE - SELECT TUNING");
-            telemetry.addLine("DPAD UP: Path/Move Kp (GoTo + Bezier)");
-            telemetry.addLine("DPAD DOWN: Turn Kp");
-            telemetry.addLine("DPAD RIGHT: Encoder offsets");
-            telemetry.addData("Selected", selectedTuningMode);
-            telemetry.addLine("Place robot in a clear area before PLAY.");
-            telemetry.update();
-            sleep(80);
-        }
+        telemetry.addLine("BillyDrive PIDF Tuning - Controllerless");
+        telemetry.addLine("After PLAY: X-axis (forward/back) tune, then Y-axis (right/left) tune.");
+        telemetry.addLine("Tune X_P/I/D/F and Y_P/I/D/F separately in FTC Dashboard.");
+        telemetry.addLine("Press STOP on the Driver Station to stop the robot.");
+        telemetry.update();
 
         waitForStart();
         if (!opModeIsActive()) {
@@ -132,32 +154,36 @@ public class BillyDrive extends LinearOpMode {
             return;
         }
 
-        switch (selectedTuningMode) {
-            case MOVE_KP: runMoveKpTuning(); break;
-            case TURN_KP: runTurnKpTuning(); break;
-            case ENCODER_OFFSETS: runEncoderOffsetCalibration(); break;
+        // Automatically test forward/back first, then right/left, without gamepad.
+        startAxisTune();
+
+        while (opModeIsActive()) {
+            updatePose();
+            recordActualPose();
+            updateAxisTune();
+            sendTelemetry();
+            idle();
         }
 
         stopDrive();
     }
 
     private void initializeHardware() {
-        leftFront = hardwareMap.get(DcMotor.class, LF_NAME);
-        rightFront = hardwareMap.get(DcMotor.class, RF_NAME);
-        leftBack = hardwareMap.get(DcMotor.class, LB_NAME);
-        rightBack = hardwareMap.get(DcMotor.class, RB_NAME);
+        lf = hardwareMap.get(DcMotor.class, LF_NAME);
+        rf = hardwareMap.get(DcMotor.class, RF_NAME);
+        lb = hardwareMap.get(DcMotor.class, LB_NAME);
+        rb = hardwareMap.get(DcMotor.class, RB_NAME);
 
-        // Separate passive odometry encoders share the Hub port objects.
-        odoVertical = rightFront;
-        odoHorizontal = leftBack;
+        // External odometry encoders connected to the m1 and m4 hub encoder ports.
+        odoVertical = lb;
+        odoHorizontal = rf;
 
-        leftFront.setDirection(DcMotorSimple.Direction.REVERSE);
-        leftBack.setDirection(DcMotorSimple.Direction.REVERSE);
-        leftFront.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        rightFront.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        leftBack.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-        rightBack.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        lf.setDirection(DcMotorSimple.Direction.REVERSE);
+        lb.setDirection(DcMotorSimple.Direction.REVERSE);
+        rf.setDirection(DcMotorSimple.Direction.FORWARD);
+        rb.setDirection(DcMotorSimple.Direction.FORWARD);
 
+        setBrake();
         odoVertical.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
         odoHorizontal.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
         odoVertical.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
@@ -168,665 +194,740 @@ public class BillyDrive extends LinearOpMode {
                 RevHubOrientationOnRobot.LogoFacingDirection.RIGHT,
                 RevHubOrientationOnRobot.UsbFacingDirection.UP)));
         imu.resetYaw();
+        dashboard = FtcDashboard.getInstance();
     }
 
-    private void initializeOdometry() {
-        x = 0;
-        y = 0;
+    private void setBrake() {
+        lf.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        rf.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        lb.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        rb.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+    }
+
+    private double rawYaw() {
+        return imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+    }
+
+    // User observed raw IMU yaw decreases during physical CCW rotation.
+    private double fieldHeading() {
+        return -rawYaw();
+    }
+
+    private void resetPose() {
+        x = 0.0;
+        y = 0.0;
+        headingRad = fieldHeading();
+        lastRawYaw = rawYaw();
         lastVerticalTicks = odoVertical.getCurrentPosition();
         lastHorizontalTicks = odoHorizontal.getCurrentPosition();
-        lastYaw = getHeading();
+        previousX = x;
+        previousY = y;
+        previousHeading = headingRad;
     }
 
-    // -------------------------- Two-wheel odometry ------------------------
-    private void updateLocation() {
-        double vTicks = odoVertical.getCurrentPosition();
-        double hTicks = odoHorizontal.getCurrentPosition();
+    private void updatePose() {
+        double v = odoVertical.getCurrentPosition();
+        double h = odoHorizontal.getCurrentPosition();
 
-        double forward = (vTicks - lastVerticalTicks)
-                * mmPerTick * VERTICAL_ENCODER_SIGN;
-        double right = (hTicks - lastHorizontalTicks)
-                * mmPerTick * HORIZONTAL_ENCODER_SIGN;
-        lastVerticalTicks = vTicks;
-        lastHorizontalTicks = hTicks;
+        double forward = (v - lastVerticalTicks) * MM_PER_TICK * VERTICAL_SIGN;
+        double right = (h - lastHorizontalTicks) * MM_PER_TICK * HORIZONTAL_SIGN;
+        lastVerticalTicks = v;
+        lastHorizontalTicks = h;
 
-        double yaw = getHeading();
-        double dYaw = normalizeAngle(yaw - lastYaw);
-        lastYaw = yaw;
+        double currentRaw = rawYaw();
+        double currentHeading = -currentRaw;
+        double previousFieldHeading = -lastRawYaw;
+        double dHeading = angleWrap(currentHeading - previousFieldHeading);
+        lastRawYaw = currentRaw;
+        headingRad = currentHeading;
 
-        // Pod rotational travel compensation. Confirm signs by spin test.
-        forward -= yOffsetEncoder * dYaw;
-        right += xOffsetEncoder * dYaw;
+        // Rotational offset compensation; verify signs with an in-place rotation test.
+        forward -= Y_OFFSET_MM * dHeading;
+        right += X_OFFSET_MM * dHeading;
 
-        // Robot-local forward/right -> field X/Y.
-        double c = Math.cos(yaw), s = Math.sin(yaw);
+        double c = Math.cos(headingRad);
+        double s = Math.sin(headingRad);
         x += forward * c + right * s;
         y += -forward * s + right * c;
     }
 
-    // -------------------------- Public path API ---------------------------
-    /** Move to a field point using a straight-line path. */
-    public void GoTo(double targetX, double targetY) {
-        followPath(Path.line(new Vector2(x, y), new Vector2(targetX, targetY)));
-    }
-
-    /** Follow a quadratic Bezier path with one control point. */
-    public void followBezier(double controlX, double controlY,
-                             double endX, double endY) {
-        followPath(Path.quadratic(new Vector2(x, y),
-                new Vector2(controlX, controlY), new Vector2(endX, endY)));
-    }
-
-    /** Follow a cubic Bezier path. */
-    public void followBezier(Vector2 control1, Vector2 control2, Vector2 end) {
-        followPath(Path.cubic(new Vector2(x, y), control1, control2, end));
-    }
-
-    /** Follow a prebuilt path. Robot heading is held at its starting angle. */
-    public void followPath(Path path) {
-        if (path == null || path.length() < 1.0) {
-            stopDrive();
-            mode = IDLE;
-            activePath = null;
-            return;
+    private void processButtonEdges() {
+        if (mode == Mode.MANUAL) {
+            if (gamepad1.a && !lastA) startGoTo(x + TEST_DISTANCE_MM, y);
+            else if (gamepad1.b && !lastB) startGoTo(x, y + TEST_DISTANCE_MM);
+            else if (gamepad1.x && !lastX) startGoTo(x - TEST_DISTANCE_MM, y);
+            else if (gamepad1.y && !lastY) startGoTo(x, y - TEST_DISTANCE_MM);
+            else if (gamepad1.dpad_right && !lastDpadRight)
+                startTurn(Math.toRadians(TEST_TURN_DEG));
+            else if (gamepad1.dpad_left && !lastDpadLeft)
+                startTurn(-Math.toRadians(TEST_TURN_DEG));
+            else if (gamepad1.right_bumper && !lastRB) startBezierTest();
+            else if (gamepad1.dpad_down && !lastDpadDown) startContinuousLoop();
+            else if (gamepad1.left_bumper && !lastLB) startPoseHold();
+        } else if (mode == Mode.POSE_HOLD && gamepad1.left_bumper && !lastLB) {
+            cancelToManual();
         }
-        activePath = path;
+
+        lastA = gamepad1.a;
+        lastB = gamepad1.b;
+        lastX = gamepad1.x;
+        lastY = gamepad1.y;
+        lastDpadLeft = gamepad1.dpad_left;
+        lastDpadRight = gamepad1.dpad_right;
+        lastDpadDown = gamepad1.dpad_down;
+        lastRB = gamepad1.right_bumper;
+        lastLB = gamepad1.left_bumper;
+    }
+
+    private void startGoTo(double gx, double gy) {
+        targetX = gx;
+        targetY = gy;
+        targetHeading = headingRad;
+        beginMode(Mode.GO_TO);
+    }
+
+    private void startPoseHold() {
+        targetX = x;
+        targetY = y;
+        targetHeading = headingRad;
+        beginMode(Mode.POSE_HOLD);
+    }
+
+    private void startTurn(double delta) {
+        targetX = x;
+        targetY = y;
+        targetHeading = angleWrap(headingRad + delta);
+        beginMode(Mode.TURN);
+    }
+
+    private void startContinuousLoop() {
+        loopCenterX = x;
+        loopCenterY = y;
+        loopStartHeading = headingRad;
+        loopIndex = 0;
+        setLoopTarget(loopIndex);
+        beginMode(Mode.LOOP);
+    }
+
+    private void startAxisTune() {
+        axisTuneCenterX = x;
+        axisTuneCenterY = y;
+        loopStartHeading = headingRad;
+        axisTuneStep = 0;
+        axisSettledSamples = 0;
+        setAxisTuneTarget();
+    }
+
+    // Sequence: X+ -> X- -> center -> Y+ -> Y- -> center, then repeat.
+    private void setAxisTuneTarget() {
+        double d = AXIS_TUNE_DISTANCE_MM;
+        switch (axisTuneStep) {
+            case 0:
+                targetX = axisTuneCenterX + d;
+                targetY = axisTuneCenterY;
+                mode = Mode.TUNE_X;
+                break;
+            case 1:
+                targetX = axisTuneCenterX - d;
+                targetY = axisTuneCenterY;
+                mode = Mode.TUNE_X;
+                break;
+            case 2:
+                targetX = axisTuneCenterX;
+                targetY = axisTuneCenterY;
+                mode = Mode.TUNE_X;
+                break;
+            case 3:
+                targetX = axisTuneCenterX;
+                targetY = axisTuneCenterY + d;
+                mode = Mode.TUNE_Y;
+                break;
+            case 4:
+                targetX = axisTuneCenterX;
+                targetY = axisTuneCenterY - d;
+                mode = Mode.TUNE_Y;
+                break;
+            default:
+                targetX = axisTuneCenterX;
+                targetY = axisTuneCenterY;
+                mode = Mode.TUNE_Y;
+                break;
+        }
+
+        targetHeading = loopStartHeading;
+        beginMode(mode);
+        axisPathStartX = x;
+        axisPathStartY = y;
+        double pathDx = targetX - axisPathStartX;
+        double pathDy = targetY - axisPathStartY;
+        axisPathLength = Math.hypot(pathDx, pathDy);
+        axisPathUnitX = axisPathLength > 1e-6 ? pathDx / axisPathLength : 0.0;
+        axisPathUnitY = axisPathLength > 1e-6 ? pathDy / axisPathLength : 0.0;
+        referenceX = axisPathStartX;
+        referenceY = axisPathStartY;
+        referenceVelocity = 0.0;
         pathProgress = 0.0;
-        targetHeading = getHeading();
-        previousHeadingError = 0.0;
-        headingTimer.reset();
-        mode = FOLLOW_PATH;
+        axisSettledSamples = 0;
     }
 
-    /** Existing public turn API, in degrees. */
-    public void TurnTo(double angleDegrees) {
-        targetHeading = normalizeAngle(Math.toRadians(angleDegrees));
-        activePath = null;
-        mode = TURN;
-    }
+    // Trapezoidal/triangular motion profile. The controller tracks the
+    // time-varying reference point on the path, not the final goal directly.
+    private void updateAxisTune() {
+        double dt = getDt();
+        double vx = (x - previousX) / dt;
+        double vy = (y - previousY) / dt;
+        previousX = x;
+        previousY = y;
 
-    /**
-     * Blocking update loop. Call after GoTo/followPath/TurnTo.
-     * The loop updates odometry and the follower at the FTC control rate.
-     */
-    public void waitForMotionComplete() {
-        while (opModeIsActive() && mode != IDLE) {
-            updateLocation();
-            updateMotion();
-            telemetry.addData("Follower", mode == FOLLOW_PATH ? "PATH" : "TURN");
-            telemetry.addData("Pose X/Y", "%.1f / %.1f", x, y);
-            telemetry.addData("Heading", "%.1f deg", Math.toDegrees(getHeading()));
-            telemetry.update();
-            idle();
-        }
-        stopDrive();
-    }
+        double[] profile = calculateLinearProfile(timer.seconds(), axisPathLength,
+                MAX_VELOCITY_MM_S, MAX_ACCEL_MM_S2);
+        pathProgress = profile[0];
+        referenceVelocity = profile[1];
+        referenceX = axisPathStartX + axisPathUnitX * pathProgress;
+        referenceY = axisPathStartY + axisPathUnitY * pathProgress;
 
-    private void updateMotion() {
-        if (mode == FOLLOW_PATH) updatePathFollower();
-        else if (mode == TURN) updateTurn();
-        else stopDrive();
-    }
+        // Tracking error: desired point on the path minus measured robot pose.
+        double errorX = referenceX - x;
+        double errorY = referenceY - y;
+        double trackingError = Math.hypot(errorX, errorY);
+        double actualSpeed = Math.hypot(vx, vy);
+        boolean profileFinished = pathProgress >= axisPathLength - 1e-3
+                && referenceVelocity <= 1e-3;
 
-    // -------------------------- Path follower -----------------------------
-    private void updatePathFollower() {
-        if (activePath == null) {
+        if (profileFinished
+                && Math.hypot(targetX - x, targetY - y) <= AXIS_TUNE_TOLERANCE_MM
+                && actualSpeed <= AXIS_TUNE_SETTLE_SPEED_MM_S) {
             stopDrive();
-            mode = IDLE;
+            axisSettledSamples++;
+            if (axisSettledSamples >= 8) {
+                axisTuneStep = (axisTuneStep + 1) % 6;
+                setAxisTuneTarget();
+            }
             return;
         }
 
-        Vector2 robot = new Vector2(x, y);
-        pathProgress = Math.max(pathProgress, activePath.closestProgress(robot, pathProgress));
-        double remaining = Math.max(0.0, activePath.length() - pathProgress);
-        Vector2 endError = activePath.end().minus(robot);
-        double endDistance = endError.norm();
-
-        // A trapezoidal-style profile expressed as a safe velocity envelope.
-        // sqrt(2*a*d) guarantees a deceleration envelope near the endpoint.
-        double desiredVelocity = Math.min(maxPathVelocity,
-                Math.sqrt(Math.max(0.0, 2.0 * maxPathAcceleration * remaining)));
-        double distanceFromStart = pathProgress;
-        desiredVelocity = Math.min(desiredVelocity,
-                Math.sqrt(Math.max(0.0, 2.0 * maxPathAcceleration * distanceFromStart)));
-
-        Vector2 lookahead = activePath.pointAtDistance(
-                Math.min(activePath.length(), pathProgress + lookaheadDistance));
-        Vector2 toLookahead = lookahead.minus(robot);
-        Vector2 tangent = activePath.tangentAtDistance(pathProgress);
-
-        // Feedforward along the path plus feedback toward the lookahead point.
-        Vector2 command = tangent.times(desiredVelocity * pathVelocityK)
-                .plus(toLookahead.times(moveKp));
-
-        // Close the final endpoint with position feedback, without orbiting
-        // around the endpoint when the lookahead point is behind the robot.
-        if (remaining < lookaheadDistance * 0.65 || endDistance < pathEndTolerance * 2.0) {
-            Vector2 finalCommand = endError.times(moveKp);
-            double finalCap = Math.min(moveMaxPower,
-                    Math.max(0.08, desiredVelocity * pathVelocityK));
-            command = limitVector(finalCommand, finalCap);
-        }
-
-        command = limitVector(command, moveMaxPower);
-        double headingCorrection = headingHoldCorrection();
-        fieldToRobot(command.x, command.y, headingCorrection);
-
-        double estimatedSpeedCommand = command.norm();
-        telemetry.addData("Path progress", "%.1f / %.1f mm", pathProgress, activePath.length());
-        telemetry.addData("Remaining", remaining);
-        telemetry.addData("Endpoint error", endDistance);
-        telemetry.addData("Command magnitude", estimatedSpeedCommand);
-
-        if (endDistance <= pathEndTolerance && remaining <= pathEndTolerance * 1.5) {
-            stopDrive();
-            activePath = null;
-            mode = IDLE;
-        }
+        axisSettledSamples = 0;
+        applyMovePIDF(errorX, errorY, vx, vy, referenceVelocity, dt);
     }
 
-    private double headingHoldCorrection() {
-        double dt = Math.max(0.005, headingTimer.seconds());
-        double error = normalizeAngle(targetHeading - getHeading());
-        double derivative = normalizeAngle(error - previousHeadingError) / dt;
-        previousHeadingError = error;
-        headingTimer.reset();
-        return clamp(headingHoldKp * error + headingHoldKd * derivative,
-                -headingHoldMaxPower, headingHoldMaxPower);
+    // Returns {distance travelled along path, reference speed}.
+    private double[] calculateLinearProfile(double elapsed, double length,
+                                            double maxVelocity, double maxAcceleration) {
+        if (length <= 1e-6 || maxVelocity <= 1e-6 || maxAcceleration <= 1e-6) {
+            return new double[]{length, 0.0};
+        }
+
+        double accelerationDistanceAtMax = maxVelocity * maxVelocity
+                / (2.0 * maxAcceleration);
+        double accelerationDistance;
+        double peakVelocity;
+        double accelerationTime;
+        double cruiseTime;
+
+        if (2.0 * accelerationDistanceAtMax >= length) {
+            // Triangular profile for short segments.
+            accelerationDistance = length * 0.5;
+            peakVelocity = Math.sqrt(length * maxAcceleration);
+            accelerationTime = peakVelocity / maxAcceleration;
+            cruiseTime = 0.0;
+        } else {
+            // Trapezoidal profile for longer segments.
+            accelerationDistance = accelerationDistanceAtMax;
+            peakVelocity = maxVelocity;
+            accelerationTime = peakVelocity / maxAcceleration;
+            cruiseTime = (length - 2.0 * accelerationDistance) / peakVelocity;
+        }
+
+        double decelerationStartTime = accelerationTime + cruiseTime;
+        double totalTime = decelerationStartTime + accelerationTime;
+
+        if (elapsed <= 0.0) return new double[]{0.0, 0.0};
+
+        if (elapsed < accelerationTime) {
+            return new double[]{
+                    0.5 * maxAcceleration * elapsed * elapsed,
+                    maxAcceleration * elapsed
+            };
+        }
+
+        if (elapsed < decelerationStartTime) {
+            double distance = accelerationDistance
+                    + peakVelocity * (elapsed - accelerationTime);
+            return new double[]{distance, peakVelocity};
+        }
+
+        if (elapsed < totalTime) {
+            double t = elapsed - decelerationStartTime;
+            double distance = accelerationDistance + peakVelocity * cruiseTime
+                    + peakVelocity * t - 0.5 * maxAcceleration * t * t;
+            return new double[]{Math.min(length, distance),
+                    Math.max(0.0, peakVelocity - maxAcceleration * t)};
+        }
+
+        return new double[]{length, 0.0};
+    }
+
+    private void setLoopTarget(int index) {
+        int count = Math.max(8, LOOP_WAYPOINTS);
+        double angle = 2.0 * Math.PI * index / count;
+        targetX = loopCenterX + LOOP_RADIUS_X_MM * Math.cos(angle);
+        targetY = loopCenterY + LOOP_RADIUS_Y_MM * Math.sin(angle);
+        targetHeading = loopStartHeading;
+    }
+
+    private void startBezierTest() {
+        p0x = x; p0y = y;
+        p1x = x + BEZIER_DISTANCE_MM * 0.30;
+        p1y = y + BEZIER_SIDE_MM;
+        p2x = x + BEZIER_DISTANCE_MM * 0.70;
+        p2y = y + BEZIER_SIDE_MM;
+        p3x = x + BEZIER_DISTANCE_MM;
+        p3y = y;
+
+        targetX = p3x;
+        targetY = p3y;
+        targetHeading = headingRad;
+        bezierT = 0.0;
+        beginMode(Mode.BEZIER);
+    }
+
+    private void beginMode(Mode newMode) {
+        integralX = integralY = turnIntegral = 0.0;
+        previousX = x;
+        previousY = y;
+        previousHeading = headingRad;
+        previousTime = 0.0;
+        settledSamples = 0;
+        timer.reset();
+        mode = newMode;
+    }
+
+    private double getDt() {
+        double now = timer.seconds();
+        double dt = Math.max(0.005, Math.min(0.05, now - previousTime));
+        previousTime = now;
+        return dt;
+    }
+
+    private void updateGoTo() {
+        if (timer.seconds() > TEST_TIMEOUT_S) {
+            finishTest("GO_TO TIMEOUT");
+            return;
+        }
+
+        double dt = getDt();
+        double dx = targetX - x;
+        double dy = targetY - y;
+        double distance = Math.hypot(dx, dy);
+        double vx = (x - previousX) / dt;
+        double vy = (y - previousY) / dt;
+        previousX = x;
+        previousY = y;
+
+        if (translationSettled(distance, Math.hypot(vx, vy))) {
+            stopDrive();
+            if (++settledSamples >= 6) finishTest("GO_TO SETTLED");
+            return;
+        }
+        settledSamples = 0;
+
+        double desiredVelocity = desiredVelocity(distance);
+        applyMovePIDF(dx, dy, vx, vy, desiredVelocity, dt);
+    }
+
+    private void updateBezier() {
+        if (timer.seconds() > TEST_TIMEOUT_S) {
+            finishTest("BEZIER TIMEOUT");
+            return;
+        }
+
+        double dt = getDt();
+        double vx = (x - previousX) / dt;
+        double vy = (y - previousY) / dt;
+        previousX = x;
+        previousY = y;
+
+        bezierT = Math.max(bezierT, closestBezierT(x, y, bezierT));
+        double aimT = Math.min(1.0, bezierT + BEZIER_LOOKAHEAD_T);
+        double[] aim = bezierPoint(aimT);
+
+        double dx = aim[0] - x;
+        double dy = aim[1] - y;
+        double endDistance = Math.hypot(p3x - x, p3y - y);
+
+        if (bezierT >= 0.97 || endDistance <= BEZIER_END_TOLERANCE_MM) {
+            dx = p3x - x;
+            dy = p3y - y;
+        }
+
+        if (translationSettled(endDistance, Math.hypot(vx, vy))) {
+            stopDrive();
+            if (++settledSamples >= 6) finishTest("BEZIER SETTLED");
+            return;
+        }
+        settledSamples = 0;
+
+        applyMovePIDF(dx, dy, vx, vy, desiredVelocity(Math.hypot(dx, dy)), dt);
+    }
+
+    private void updateLoop() {
+        double dt = getDt();
+        double dx = targetX - x;
+        double dy = targetY - y;
+        double distance = Math.hypot(dx, dy);
+
+        double vx = (x - previousX) / dt;
+        double vy = (y - previousY) / dt;
+        previousX = x;
+        previousY = y;
+
+        // Advance around the ellipse continuously; no test timeout.
+        if (distance <= LOOP_WAYPOINT_TOLERANCE_MM) {
+            loopIndex = (loopIndex + 1) % Math.max(8, LOOP_WAYPOINTS);
+            setLoopTarget(loopIndex);
+            dx = targetX - x;
+            dy = targetY - y;
+            distance = Math.hypot(dx, dy);
+            integralX = 0.0;
+            integralY = 0.0;
+        }
+
+        applyMovePIDF(dx, dy, vx, vy, desiredVelocity(distance), dt);
+    }
+
+    private void updatePoseHold() {
+        double dt = getDt();
+        double dx = targetX - x;
+        double dy = targetY - y;
+        double vx = (x - previousX) / dt;
+        double vy = (y - previousY) / dt;
+        previousX = x;
+        previousY = y;
+
+        // No velocity feedforward while holding a stationary target.
+        applyMovePIDF(dx, dy, vx, vy, 0.0, dt);
     }
 
     private void updateTurn() {
-        // Preserve the existing BillyDrive TurnTo error convention.
-        double error = normalizeAngle(targetHeading + getHeading());
-        if (Math.abs(error) <= turnTolerance) {
-            stopDrive();
-            mode = IDLE;
+        if (timer.seconds() > TEST_TIMEOUT_S) {
+            finishTest("TURN TIMEOUT");
             return;
         }
-        double turn = clamp(turnKp * error, -turnMaxPower, turnMaxPower);
-        if (Math.abs(turn) < turnMinPower) turn = Math.copySign(turnMinPower, error);
-        drivePower(0, 0, turn);
-    }
 
-    // -------------------------- Auto tuning: shared Move Kp ---------------
-    private void runMoveKpTuning() {
-        tuningCompleted = false;
-        tuningFailed = false;
-        tuningStage = "Path follower Move Kp (GoTo + Bezier)";
-        failureReason = "";
-        lastTrialResult = "No trial completed";
-        totalTrials = 0;
-        bestMoveScore = Double.MAX_VALUE;
-        bestMoveKp = moveKp;
+        double dt = getDt();
+        double error = angleWrap(targetHeading - headingRad);
+        double angularVelocity = angleWrap(headingRad - previousHeading) / dt;
+        previousHeading = headingRad;
 
-        updateLocation();
-        tuningOriginX = x;
-        tuningOriginY = y;
-
-        telemetry.clear();
-        telemetry.addLine("PATH FOLLOWER MOVE KP TUNING");
-        telemetry.addLine("Tests: straight GoTo + curved Bezier");
-        telemetry.addLine("Keep robot in a clear area; press STOP to abort.");
-        telemetry.update();
-        sleep(1500);
-
-        // A compact grid search; each candidate is evaluated on both path types.
-        final double[] candidates = {
-                moveKpMin,
-                moveKpMin + (moveKpMax - moveKpMin) * 0.25,
-                moveKpMin + (moveKpMax - moveKpMin) * 0.50,
-                moveKpMin + (moveKpMax - moveKpMin) * 0.75,
-                moveKpMax
-        };
-
-        for (int i = 0; i < candidates.length && opModeIsActive(); i++) {
-            double candidate = candidates[i];
-            double goScore = evaluatePathTrial(candidate, false);
-            if (!opModeIsActive() || tuningFailed) break;
-            if (!returnToTrialStart()) {
-                tuningFailed = true;
-                failureReason = "Could not return to trial start; tuning aborted for safety.";
-                break;
-            }
-
-            double curveScore = evaluatePathTrial(candidate, true);
-            if (!opModeIsActive() || tuningFailed) break;
-            if (!returnToTrialStart()) {
-                tuningFailed = true;
-                failureReason = "Could not return to trial start after Bezier; tuning aborted.";
-                break;
-            }
-
-            if (goScore == Double.MAX_VALUE || curveScore == Double.MAX_VALUE) continue;
-            double score = goScore + curveScore;
-            totalTrials += 2;
-            if (score < bestMoveScore) {
-                bestMoveScore = score;
-                bestMoveKp = candidate;
-            }
-
-            telemetry.addData("Candidate", candidate);
-            telemetry.addData("GoTo score", goScore);
-            telemetry.addData("Bezier score", curveScore);
-            telemetry.addData("Best Kp", bestMoveKp);
-            telemetry.update();
-        }
-
-        if (!tuningFailed && bestMoveScore < Double.MAX_VALUE && opModeIsActive()) {
-            moveKp = bestMoveKp;
-            tuningCompleted = true;
-        } else if (!tuningFailed) {
-            tuningFailed = true;
-            failureReason = "No candidate completed both path tests.";
-        }
-        finishTuning();
-    }
-
-    private double evaluatePathTrial(double candidateKp, boolean curved) {
-        updateLocation();
-        double sx = x, sy = y;
-        moveKp = candidateKp;
-
-        Path testPath;
-        if (!curved) {
-            testPath = Path.line(new Vector2(sx, sy),
-                    new Vector2(sx + testDistance, sy));
-        } else {
-            testPath = Path.quadratic(new Vector2(sx, sy),
-                    new Vector2(sx + testDistance * 0.50, sy + 65.0),
-                    new Vector2(sx + testDistance, sy));
-        }
-
-        followPath(testPath);
-        ElapsedTime timer = new ElapsedTime();
-        double maxDisplacement = 0.0;
-
-        while (opModeIsActive() && mode != IDLE && timer.seconds() < moveTrialTimeout) {
-            updateLocation();
-            double displacement = Math.hypot(x - sx, y - sy);
-            maxDisplacement = Math.max(maxDisplacement, displacement);
-
-            if (displacement > maxTrialDisplacement) {
-                stopDrive();
-                mode = IDLE;
-                activePath = null;
-                tuningFailed = true;
-                failureReason = "Trial safety stop: robot moved " + displacement
-                        + " mm from its start (limit " + maxTrialDisplacement + " mm).";
-                lastTrialResult = failureReason;
-                return Double.MAX_VALUE;
-            }
-
-            updateMotion();
-            telemetry.addData("Auto tuning", curved ? "Bezier path" : "GoTo line");
-            telemetry.addData("Candidate Kp", candidateKp);
-            telemetry.addData("Pose", "%.1f / %.1f", x, y);
-            telemetry.addData("Elapsed", "%.2f s", timer.seconds());
-            telemetry.addData("Distance from trial start", displacement);
-            telemetry.update();
-            idle();
-        }
-
-        boolean completed = opModeIsActive() && mode == IDLE;
-        double elapsed = timer.seconds();
-        double endpointError = Math.hypot(testPath.end().x - x, testPath.end().y - y);
-        stopDrive();
-        mode = IDLE;
-        activePath = null;
-
-        if (!completed) {
-            lastTrialResult = (curved ? "Bezier" : "GoTo")
-                    + " timeout; endpoint error=" + endpointError + " mm";
-            return Double.MAX_VALUE;
-        }
-
-        double score = elapsed + endpointError * 0.025;
-        lastTrialResult = (curved ? "Bezier" : "GoTo") + " completed; Kp="
-                + candidateKp + ", time=" + elapsed + "s, error="
-                + endpointError + "mm, score=" + score;
-        return score;
-    }
-
-    /** Return to the position at the start of the preceding tuning trial. */
-    private boolean returnToTrialStart() {
-        updateLocation();
-        // The trial's expected endpoint is behind/ahead along the X axis.
-        // Use a conservative direct line to the fixed tuning origin for safety.
-        double dx = tuningOriginX - x;
-        double dy = tuningOriginY - y;
-        if (Math.hypot(dx, dy) < pathEndTolerance) return true;
-
-        double savedKp = moveKp;
-        moveKp = Math.min(savedKp, 0.0012);
-        followPath(Path.line(new Vector2(x, y), new Vector2(tuningOriginX, tuningOriginY)));
-        ElapsedTime timer = new ElapsedTime();
-        while (opModeIsActive() && mode != IDLE && timer.seconds() < returnTimeout) {
-            updateLocation();
-            if (Math.hypot(x - tuningOriginX, y - tuningOriginY) > maxTrialDisplacement) {
-                stopDrive();
-                mode = IDLE;
-                activePath = null;
-                moveKp = savedKp;
-                return false;
-            }
-            updateMotion();
-            telemetry.addLine("Returning to tuning origin...");
-            telemetry.addData("Return error", Math.hypot(x - tuningOriginX, y - tuningOriginY));
-            telemetry.update();
-            idle();
-        }
-        boolean ok = mode == IDLE && opModeIsActive()
-                && Math.hypot(x - tuningOriginX, y - tuningOriginY) < pathEndTolerance * 2.0;
-        stopDrive();
-        mode = IDLE;
-        activePath = null;
-        moveKp = savedKp;
-        return ok;
-    }
-
-    // -------------------------- Turn Kp tuning -----------------------------
-    private void runTurnKpTuning() {
-        tuningCompleted = false;
-        tuningFailed = false;
-        tuningStage = "Turn Kp";
-        totalTrials = 0;
-        double[] candidates = {0.08, 0.14, 0.20, 0.27, 0.34};
-        double bestScore = Double.MAX_VALUE;
-        double chosen = turnKp;
-
-        for (double candidate : candidates) {
-            if (!opModeIsActive()) break;
-            turnKp = candidate;
-            double score = evaluateTurnTrial(candidate);
-            if (score < bestScore) {
-                bestScore = score;
-                chosen = candidate;
-            }
-        }
-        if (bestScore < Double.MAX_VALUE && opModeIsActive()) {
-            turnKp = chosen;
-            tuningCompleted = true;
-        } else {
-            tuningFailed = true;
-            failureReason = "No TurnTo candidate completed.";
-        }
-        finishTuning();
-    }
-
-    private double evaluateTurnTrial(double candidate) {
-        double start = getHeading();
-        targetHeading = normalizeAngle(start + Math.toRadians(45.0));
-        mode = TURN;
-        ElapsedTime timer = new ElapsedTime();
-        while (opModeIsActive() && mode != IDLE && timer.seconds() < 6.0) {
-            updateLocation();
-            updateTurn();
-            telemetry.addData("Turn Kp candidate", candidate);
-            telemetry.addData("Heading", Math.toDegrees(getHeading()));
-            telemetry.update();
-            idle();
-        }
-        double error = Math.abs(normalizeAngle(targetHeading + getHeading()));
-        boolean done = mode == IDLE;
-        stopDrive();
-        mode = IDLE;
-        if (!done) return Double.MAX_VALUE;
-        totalTrials++;
-        return timer.seconds() + Math.toDegrees(error) * 0.05;
-    }
-
-    // -------------------------- Encoder offset calibration ----------------
-    private void runEncoderOffsetCalibration() {
-        tuningCompleted = false;
-        tuningFailed = false;
-        tuningStage = "Encoder offsets";
-        final double targetRadians = Math.toRadians(360);
-        final double power = 0.12;
-        final double timeout = 14.0;
-        int startV = odoVertical.getCurrentPosition();
-        int startH = odoHorizontal.getCurrentPosition();
-        double previousYaw = getHeading();
-        double accumulatedYaw = 0.0;
-        ElapsedTime timer = new ElapsedTime();
-
-        while (opModeIsActive() && Math.abs(accumulatedYaw) < targetRadians
-                && timer.seconds() < timeout) {
-            double yaw = getHeading();
-            accumulatedYaw += normalizeAngle(yaw - previousYaw);
-            previousYaw = yaw;
-            drivePower(0, 0, power);
-            telemetry.addData("Offset calibration yaw", Math.toDegrees(accumulatedYaw));
-            telemetry.update();
-            idle();
-        }
-        stopDrive();
-
-        double vTravel = (odoVertical.getCurrentPosition() - startV)
-                * mmPerTick * VERTICAL_ENCODER_SIGN;
-        double hTravel = (odoHorizontal.getCurrentPosition() - startH)
-                * mmPerTick * HORIZONTAL_ENCODER_SIGN;
-
-        if (Math.abs(accumulatedYaw) < Math.toRadians(270) || timer.seconds() >= timeout) {
-            tuningFailed = true;
-            failureReason = "Rotation did not reach at least 270 degrees.";
-        } else {
-            double newX = vTravel / accumulatedYaw;
-            double newY = hTravel / accumulatedYaw;
-            if (Double.isFinite(newX) && Double.isFinite(newY)
-                    && Math.abs(newX) >= 5 && Math.abs(newX) <= 500
-                    && Math.abs(newY) >= 5 && Math.abs(newY) <= 500) {
-                xOffsetEncoder = newX;
-                yOffsetEncoder = newY;
-                tuningCompleted = true;
-            } else {
-                tuningFailed = true;
-                failureReason = "Calculated offsets out of range. Check encoder signs/scale.";
-            }
-        }
-
-        x = 0;
-        y = 0;
-        lastVerticalTicks = odoVertical.getCurrentPosition();
-        lastHorizontalTicks = odoHorizontal.getCurrentPosition();
-        lastYaw = getHeading();
-        finishTuning();
-    }
-
-    private void finishTuning() {
-        stopDrive();
-        mode = IDLE;
-        activePath = null;
-        telemetry.clear();
-        telemetry.addLine("========== BILLYDRIVE TUNING ==========");
-        telemetry.addData("Task", tuningStage);
-        telemetry.addData("Status", tuningCompleted ? "COMPLETED" : "FAILED");
-        if (tuningFailed) telemetry.addData("Failure", failureReason);
-        telemetry.addData("Last trial", lastTrialResult);
-        telemetry.addData("moveKp", moveKp);
-        telemetry.addData("turnKp", turnKp);
-        telemetry.addData("X offset", xOffsetEncoder);
-        telemetry.addData("Y offset", yOffsetEncoder);
-        telemetry.addData("Trials", totalTrials);
-        telemetry.addLine("Robot stopped.");
-        telemetry.update();
-        while (opModeIsActive()) {
+        if (Math.abs(error) <= Math.toRadians(HEADING_TOLERANCE_DEG)
+                && Math.abs(Math.toDegrees(angularVelocity))
+                <= SETTLE_ANGULAR_VELOCITY_DEG_S) {
             stopDrive();
-            idle();
+            if (++settledSamples >= 6) finishTest("TURN SETTLED");
+            return;
         }
+        settledSamples = 0;
+
+        turnIntegral = clamp(turnIntegral + error * dt,
+                -TURN_INTEGRAL_LIMIT, TURN_INTEGRAL_LIMIT);
+        double output = TURN_P * error + TURN_I * turnIntegral
+                - TURN_D * angularVelocity;
+
+        if (Math.abs(error) > Math.toRadians(HEADING_TOLERANCE_DEG))
+            output += Math.copySign(TURN_F, error);
+
+        driveRobot(0.0, 0.0, clamp(output, -MAX_TURN_POWER, MAX_TURN_POWER));
     }
 
-    // -------------------------- Coordinate transforms ---------------------
+    private void applyMovePIDF(double dx, double dy, double vx, double vy,
+                               double desiredSpeed, double dt) {
+        integralX = clamp(integralX + dx * dt,
+                -MOVE_INTEGRAL_LIMIT, MOVE_INTEGRAL_LIMIT);
+        integralY = clamp(integralY + dy * dt,
+                -MOVE_INTEGRAL_LIMIT, MOVE_INTEGRAL_LIMIT);
+
+        double distance = Math.hypot(dx, dy);
+        double ux = distance > 1e-6 ? dx / distance : 0.0;
+        double uy = distance > 1e-6 ? dy / distance : 0.0;
+
+        double outX = X_P * dx + X_I * integralX
+                - X_D * vx + X_F * desiredSpeed * ux;
+        double outY = Y_P * dy + Y_I * integralY
+                - Y_D * vy + Y_F * desiredSpeed * uy;
+
+        double moveLimit = (mode == Mode.TUNE_X || mode == Mode.TUNE_Y)
+                ? Math.min(MAX_MOVE_POWER, AXIS_TUNE_MAX_POWER)
+                : MAX_MOVE_POWER;
+        double magnitude = Math.hypot(outX, outY);
+        if (magnitude > moveLimit && magnitude > 1e-9) {
+            outX *= moveLimit / magnitude;
+            outY *= moveLimit / magnitude;
+        }
+        // Calculate heading correction in the same drive command so it does
+        // not overwrite the translational motor powers.
+        double headingError = angleWrap(targetHeading - headingRad);
+        double angularVelocity = angleWrap(headingRad - previousHeading) / dt;
+        previousHeading = headingRad;
+
+        turnIntegral = clamp(turnIntegral + headingError * dt,
+                -TURN_INTEGRAL_LIMIT, TURN_INTEGRAL_LIMIT);
+        double turnOutput = TURN_P * headingError
+                + TURN_I * turnIntegral
+                - TURN_D * angularVelocity;
+
+        if (Math.abs(headingError) > Math.toRadians(HEADING_TOLERANCE_DEG)) {
+            turnOutput += Math.copySign(TURN_F, headingError);
+        }
+
+        turnOutput = clamp(turnOutput, -MAX_TURN_POWER, MAX_TURN_POWER);
+        fieldToRobot(outX, outY, turnOutput);
+    }
+
+    private double desiredVelocity(double distance) {
+        return Math.min(MAX_VELOCITY_MM_S,
+                Math.sqrt(Math.max(0.0, 2.0 * MAX_ACCEL_MM_S2 * distance)));
+    }
+
+    private boolean translationSettled(double distance, double speed) {
+        return distance <= POSITION_TOLERANCE_MM
+                && speed <= SETTLE_VELOCITY_MM_S;
+    }
+
+    private void manualDrive() {
+        double forward = -gamepad1.left_stick_y * MANUAL_DRIVE_SCALE;
+        double right = gamepad1.left_stick_x * MANUAL_DRIVE_SCALE;
+        double turn = gamepad1.right_stick_x * MANUAL_DRIVE_SCALE;
+        driveRobot(right, forward, turn);
+    }
+
+    private void finishTest(String message) {
+        stopDrive();
+        mode = Mode.MANUAL;
+        telemetry.addData("Last test", message);
+    }
+
+    private void cancelToManual() {
+        stopDrive();
+        mode = Mode.MANUAL;
+        integralX = integralY = turnIntegral = 0.0;
+    }
+
     private void fieldToRobot(double fieldX, double fieldY, double turn) {
-        double h = getHeading();
-        double c = Math.cos(h), s = Math.sin(h);
+        double c = Math.cos(headingRad);
+        double s = Math.sin(headingRad);
         double forward = fieldX * c - fieldY * s;
         double right = fieldX * s + fieldY * c;
-        drivePower(right, forward, turn);
+        driveRobot(right, forward, turn);
     }
 
-    /** xPower = right/strafe, yPower = forward. */
-    private void drivePower(double xPower, double yPower, double turnPower) {
-        double lf = yPower + xPower + turnPower;
-        double rf = yPower - xPower - turnPower;
-        double lb = yPower - xPower + turnPower;
-        double rb = yPower + xPower - turnPower;
-        double max = Math.max(1.0, Math.max(Math.max(Math.abs(lf), Math.abs(rf)),
-                Math.max(Math.abs(lb), Math.abs(rb))));
-        leftFront.setPower(lf / max);
-        rightFront.setPower(rf / max);
-        leftBack.setPower(lb / max);
-        rightBack.setPower(rb / max);
+    // xPower = robot-right, yPower = robot-forward.
+    private void driveRobot(double xPower, double yPower, double turnPower) {
+        double pLF = yPower + xPower + turnPower;
+        double pRF = yPower - xPower - turnPower;
+        double pLB = yPower - xPower + turnPower;
+        double pRB = yPower + xPower - turnPower;
+
+        double max = Math.max(1.0, Math.max(
+                Math.max(Math.abs(pLF), Math.abs(pRF)),
+                Math.max(Math.abs(pLB), Math.abs(pRB))));
+        lf.setPower(pLF / max);
+        rf.setPower(pRF / max);
+        lb.setPower(pLB / max);
+        rb.setPower(pRB / max);
     }
 
     private void stopDrive() {
-        if (leftFront != null) leftFront.setPower(0);
-        if (rightFront != null) rightFront.setPower(0);
-        if (leftBack != null) leftBack.setPower(0);
-        if (rightBack != null) rightBack.setPower(0);
+        if (lf != null) lf.setPower(0.0);
+        if (rf != null) rf.setPower(0.0);
+        if (lb != null) lb.setPower(0.0);
+        if (rb != null) rb.setPower(0.0);
     }
 
-    private double getHeading() {
-        return imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+    private double[] bezierPoint(double t) {
+        double u = 1.0 - t;
+        double b0 = u * u * u;
+        double b1 = 3.0 * u * u * t;
+        double b2 = 3.0 * u * t * t;
+        double b3 = t * t * t;
+        return new double[]{
+                b0 * p0x + b1 * p1x + b2 * p2x + b3 * p3x,
+                b0 * p0y + b1 * p1y + b2 * p2y + b3 * p3y
+        };
     }
 
-    private static double normalizeAngle(double angle) {
+    // Search forward only, so the path parameter cannot jump backwards.
+    private double closestBezierT(double px, double py, double minT) {
+        double bestT = minT;
+        double bestDistance = Double.POSITIVE_INFINITY;
+        for (double t = minT; t <= 1.0001; t += 0.02) {
+            double[] point = bezierPoint(Math.min(1.0, t));
+            double d = Math.hypot(point[0] - px, point[1] - py);
+            if (d < bestDistance) {
+                bestDistance = d;
+                bestT = Math.min(1.0, t);
+            }
+        }
+        return bestT;
+    }
+
+    private void recordActualPose() {
+        actualTrailX[actualTrailWriteIndex] = x;
+        actualTrailY[actualTrailWriteIndex] = y;
+        actualTrailWriteIndex = (actualTrailWriteIndex + 1) % ACTUAL_TRAIL_CAPACITY;
+        if (actualTrailCount < ACTUAL_TRAIL_CAPACITY) {
+            actualTrailCount++;
+        }
+    }
+
+    private double drawX(double value) {
+        return value * FIELD_DRAW_SCALE;
+    }
+
+    private double drawY(double value) {
+        return value * FIELD_DRAW_SCALE;
+    }
+
+    private void sendTelemetry() {
+        double errorX = referenceX - x;
+        double errorY = referenceY - y;
+        double positionError = Math.hypot(errorX, errorY);
+        double goalError = Math.hypot(targetX - x, targetY - y);
+        double headingError = Math.toDegrees(angleWrap(targetHeading - headingRad));
+
+        telemetry.addData("Mode", mode);
+        telemetry.addData("Pose X/Y (mm)", "%.1f / %.1f", x, y);
+        telemetry.addData("Heading (deg)", "%.1f", Math.toDegrees(headingRad));
+        telemetry.addData("Path reference X/Y", "%.1f / %.1f", referenceX, referenceY);
+        telemetry.addData("Path tracking error X/Y", "%.1f / %.1f", errorX, errorY);
+        telemetry.addData("Path tracking error (mm)", "%.1f", positionError);
+        telemetry.addData("Goal error (mm)", "%.1f", goalError);
+        telemetry.addData("Heading error (deg)", "%.2f", headingError);
+        telemetry.addData("Bezier t", "%.2f", bezierT);
+        telemetry.addData("Tune phase", "%s | step %d/6", mode, axisTuneStep + 1);
+        telemetry.addData("X PIDF", "%.6f / %.6f / %.6f / %.6f",
+                X_P, X_I, X_D, X_F);
+        telemetry.addData("Y PIDF", "%.6f / %.6f / %.6f / %.6f",
+                Y_P, Y_I, Y_D, Y_F);
+        telemetry.addData("TURN P/I/D/F", "%.4f / %.4f / %.4f / %.4f",
+                TURN_P, TURN_I, TURN_D, TURN_F);
+        telemetry.addLine("A/B/X/Y: GoTo | RB: Bezier | D-pad DOWN: LOOP");
+        telemetry.addLine("LB: PoseHold | D-pad L/R: Turn | START: cancel");
+        telemetry.update();
+
+        TelemetryPacket packet = new TelemetryPacket();
+        packet.put("mode", mode.toString());
+        packet.put("axisTuneStep", axisTuneStep + 1);
+        packet.put("X_P", X_P);
+        packet.put("X_I", X_I);
+        packet.put("X_D", X_D);
+        packet.put("X_F", X_F);
+        packet.put("Y_P", Y_P);
+        packet.put("Y_I", Y_I);
+        packet.put("Y_D", Y_D);
+        packet.put("Y_F", Y_F);
+        packet.put("x_mm", x);
+        packet.put("y_mm", y);
+        packet.put("heading_deg", Math.toDegrees(headingRad));
+        packet.put("goal_x_mm", targetX);
+        packet.put("goal_y_mm", targetY);
+        packet.put("reference_x_mm", referenceX);
+        packet.put("reference_y_mm", referenceY);
+        packet.put("error_x_mm", errorX);
+        packet.put("error_y_mm", errorY);
+        packet.put("path_tracking_error_mm", positionError);
+        packet.put("goal_error_mm", goalError);
+        packet.put("path_progress_mm", pathProgress);
+        packet.put("reference_velocity_mm_s", referenceVelocity);
+        packet.put("heading_error_deg", headingError);
+        packet.put("bezier_t", bezierT);
+
+        // Compact RoadRunner-style overlay:
+        // blue = planned path, orange = actual odometry trail, green = robot.
+        Canvas canvas = packet.fieldOverlay();
+
+        // 1) Planned path.
+        if (mode == Mode.LOOP) {
+            int count = Math.max(8, LOOP_WAYPOINTS);
+            double[] pathX = new double[count + 1];
+            double[] pathY = new double[count + 1];
+            for (int i = 0; i <= count; i++) {
+                double a = 2.0 * Math.PI * (i % count) / count;
+                pathX[i] = drawX(loopCenterX + LOOP_RADIUS_X_MM * Math.cos(a));
+                pathY[i] = drawY(loopCenterY + LOOP_RADIUS_Y_MM * Math.sin(a));
+            }
+            canvas.setStroke("#2196F3");
+            canvas.setStrokeWidth(3);
+            canvas.strokePolyline(pathX, pathY);
+        } else if (mode == Mode.BEZIER) {
+            double[] pathX = new double[51];
+            double[] pathY = new double[51];
+            for (int i = 0; i <= 50; i++) {
+                double[] point = bezierPoint(i / 50.0);
+                pathX[i] = drawX(point[0]);
+                pathY[i] = drawY(point[1]);
+            }
+            canvas.setStroke("#2196F3");
+            canvas.setStrokeWidth(3);
+            canvas.strokePolyline(pathX, pathY);
+        } else if (mode == Mode.TUNE_X || mode == Mode.TUNE_Y) {
+            canvas.setStroke("#2196F3");
+            canvas.setStrokeWidth(3);
+            canvas.strokeLine(drawX(axisPathStartX), drawY(axisPathStartY),
+                    drawX(targetX), drawY(targetY));
+            canvas.setStroke("#FFFFFF");
+            canvas.setStrokeWidth(2);
+            canvas.strokeCircle(drawX(referenceX), drawY(referenceY),
+                    10.0 * FIELD_DRAW_SCALE);
+        } else {
+            canvas.setStroke("#2196F3");
+            canvas.setStrokeWidth(3);
+            canvas.strokeLine(drawX(x), drawY(y), drawX(targetX), drawY(targetY));
+        }
+
+        // 2) Actual path travelled, reconstructed from odometry samples.
+        if (actualTrailCount >= 2) {
+            double[] actualX = new double[actualTrailCount];
+            double[] actualY = new double[actualTrailCount];
+            int first = (actualTrailWriteIndex - actualTrailCount + ACTUAL_TRAIL_CAPACITY)
+                    % ACTUAL_TRAIL_CAPACITY;
+            for (int i = 0; i < actualTrailCount; i++) {
+                int index = (first + i) % ACTUAL_TRAIL_CAPACITY;
+                actualX[i] = drawX(actualTrailX[index]);
+                actualY[i] = drawY(actualTrailY[index]);
+            }
+            canvas.setStroke("#FF9800");
+            canvas.setStrokeWidth(3);
+            canvas.strokePolyline(actualX, actualY);
+        }
+
+        // 3) Robot position and heading.
+        double robotDrawX = drawX(x);
+        double robotDrawY = drawY(y);
+        double robotRadius = ROBOT_DRAW_RADIUS_MM * FIELD_DRAW_SCALE;
+        canvas.setStroke("#4CAF50");
+        canvas.setStrokeWidth(3);
+        canvas.strokeCircle(robotDrawX, robotDrawY, robotRadius);
+
+        double arrowLength = robotRadius * 1.5;
+        double arrowX = robotDrawX + arrowLength * Math.cos(headingRad);
+        double arrowY = robotDrawY - arrowLength * Math.sin(headingRad);
+        canvas.setStroke("#F44336");
+        canvas.setStrokeWidth(4);
+        canvas.strokeLine(robotDrawX, robotDrawY, arrowX, arrowY);
+
+        // Small target marker; it is not part of the three main visual layers.
+        canvas.setStroke("#B0BEC5");
+        canvas.setStrokeWidth(2);
+        canvas.strokeCircle(drawX(targetX), drawY(targetY), 12.0 * FIELD_DRAW_SCALE);
+
+        dashboard.sendTelemetryPacket(packet);
+    }
+
+    private static double angleWrap(double angle) {
         return Math.atan2(Math.sin(angle), Math.cos(angle));
     }
 
     private static double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
-    }
-
-    private static Vector2 limitVector(Vector2 v, double max) {
-        double n = v.norm();
-        return n > max && n > 1e-9 ? v.times(max / n) : v;
-    }
-
-    // =====================================================================
-    // Nested geometry classes: kept in this same Java file.
-    // =====================================================================
-
-    public static class Vector2 {
-        public final double x, y;
-        public Vector2(double x, double y) { this.x = x; this.y = y; }
-        public Vector2 plus(Vector2 b) { return new Vector2(x + b.x, y + b.y); }
-        public Vector2 minus(Vector2 b) { return new Vector2(x - b.x, y - b.y); }
-        public Vector2 times(double k) { return new Vector2(x * k, y * k); }
-        public double dot(Vector2 b) { return x * b.x + y * b.y; }
-        public double norm() { return Math.hypot(x, y); }
-        public Vector2 normalized() {
-            double n = norm();
-            return n < 1e-9 ? new Vector2(0, 0) : times(1.0 / n);
-        }
-        public double distanceTo(Vector2 b) { return minus(b).norm(); }
-    }
-
-    /**
-     * Arc-length sampled cubic Bezier path. Lines and quadratic curves are
-     * converted to cubic curves so the follower uses one consistent pipeline.
-     */
-    public static class Path {
-        private static final int SAMPLES = 160;
-        private final Vector2 p0, p1, p2, p3;
-        private final double[] sampleT = new double[SAMPLES + 1];
-        private final double[] sampleS = new double[SAMPLES + 1];
-        private final double totalLength;
-
-        private Path(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3) {
-            this.p0 = p0; this.p1 = p1; this.p2 = p2; this.p3 = p3;
-            sampleT[0] = 0;
-            sampleS[0] = 0;
-            Vector2 previous = point(0);
-            double length = 0;
-            for (int i = 1; i <= SAMPLES; i++) {
-                double t = (double) i / SAMPLES;
-                Vector2 current = point(t);
-                length += current.distanceTo(previous);
-                sampleT[i] = t;
-                sampleS[i] = length;
-                previous = current;
-            }
-            totalLength = length;
-        }
-
-        public static Path line(Vector2 start, Vector2 end) {
-            Vector2 delta = end.minus(start);
-            return new Path(start, start.plus(delta.times(1.0 / 3.0)),
-                    start.plus(delta.times(2.0 / 3.0)), end);
-        }
-
-        public static Path quadratic(Vector2 start, Vector2 control, Vector2 end) {
-            // Exact quadratic-to-cubic conversion.
-            Vector2 c1 = start.plus(control.minus(start).times(2.0 / 3.0));
-            Vector2 c2 = end.plus(control.minus(end).times(2.0 / 3.0));
-            return new Path(start, c1, c2, end);
-        }
-
-        public static Path cubic(Vector2 start, Vector2 c1, Vector2 c2, Vector2 end) {
-            return new Path(start, c1, c2, end);
-        }
-
-        public double length() { return totalLength; }
-        public Vector2 end() { return p3; }
-
-        public Vector2 point(double t) {
-            t = clamp(t, 0, 1);
-            double u = 1 - t;
-            return p0.times(u * u * u)
-                    .plus(p1.times(3 * u * u * t))
-                    .plus(p2.times(3 * u * t * t))
-                    .plus(p3.times(t * t * t));
-        }
-
-        public Vector2 derivative(double t) {
-            t = clamp(t, 0, 1);
-            double u = 1 - t;
-            return p1.minus(p0).times(3 * u * u)
-                    .plus(p2.minus(p1).times(6 * u * t))
-                    .plus(p3.minus(p2).times(3 * t * t));
-        }
-
-        public Vector2 tangentAtDistance(double distance) {
-            double t = tAtDistance(distance);
-            Vector2 tangent = derivative(t).normalized();
-            if (tangent.norm() < 1e-8) return p3.minus(p0).normalized();
-            return tangent;
-        }
-
-        public Vector2 pointAtDistance(double distance) {
-            return point(tAtDistance(distance));
-        }
-
-        private double tAtDistance(double distance) {
-            if (totalLength < 1e-9) return 1;
-            double s = clamp(distance, 0, totalLength);
-            int lo = 0, hi = SAMPLES;
-            while (lo < hi) {
-                int mid = (lo + hi) >>> 1;
-                if (sampleS[mid] < s) lo = mid + 1;
-                else hi = mid;
-            }
-            int i = Math.max(1, lo);
-            double s0 = sampleS[i - 1], s1 = sampleS[i];
-            double fraction = s1 - s0 < 1e-9 ? 0 : (s - s0) / (s1 - s0);
-            return sampleT[i - 1] + (sampleT[i] - sampleT[i - 1]) * fraction;
-        }
-
-        /** Find nearest point only at/after prior progress, avoiding backwards jumps. */
-        public double closestProgress(Vector2 robot, double minimumProgress) {
-            double minT = tAtDistance(minimumProgress);
-            int start = Math.max(0, (int) Math.floor(minT * SAMPLES) - 2);
-            double bestDistance = Double.MAX_VALUE;
-            double bestS = minimumProgress;
-            for (int i = start; i <= SAMPLES; i++) {
-                Vector2 p = point(sampleT[i]);
-                double d = p.distanceTo(robot);
-                if (d < bestDistance) {
-                    bestDistance = d;
-                    bestS = sampleS[i];
-                }
-            }
-            return Math.max(minimumProgress, bestS);
-        }
     }
 }
