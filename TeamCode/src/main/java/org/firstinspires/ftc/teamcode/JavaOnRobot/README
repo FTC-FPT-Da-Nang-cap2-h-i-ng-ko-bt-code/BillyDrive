@@ -1,0 +1,883 @@
+# BillyDriveLib
+
+**FTC Mecanum Drive & Autonomous Pathing Library**
+
+BillyDriveLib là thư viện Java dành cho FTC, cung cấp hệ thống điều khiển robot mecanum, odometry hai encoder kết hợp IMU, PIDF controller, Bezier pathing và Action System.
+
+Thư viện được thiết kế theo hướng đơn giản hóa việc lập trình Autonomous: thay vì phải tự viết nhiều vòng lặp điều khiển, người dùng có thể xây dựng toàn bộ lộ trình bằng `PathBuilder` và kết hợp các hành động của cơ cấu phụ thông qua `Action`.
+
+---
+
+## 1. Features
+
+### Drive System
+- Điều khiển robot mecanum 4 bánh.
+- Robot-centric và field-centric drive.
+- Điều khiển vị trí X/Y.
+- Điều khiển heading.
+- Di chuyển và xoay đồng thời.
+- Giới hạn công suất và cấu hình PIDF.
+
+### Odometry
+- Two-wheel odometry.
+- Kết hợp IMU để xác định heading.
+- Tính toán vị trí X/Y.
+- Hỗ trợ hiệu chỉnh X Offset và Y Offset.
+- Reset pose.
+
+### Pathing
+- Line-to-point movement.
+- Line-to-pose movement.
+- Turn-to-heading.
+- Cubic Bezier path.
+- Path Builder API.
+- Tự động thực thi toàn bộ path.
+- Timeout cho từng bước chuyển động.
+
+### Action System
+- Sequential Actions.
+- Parallel Actions.
+- Instant Actions.
+- Wait Actions.
+- Servo Actions.
+- Custom Actions.
+- Kết hợp action với quá trình di chuyển.
+
+### Motion Control
+- PIDF Controller.
+- Trapezoidal Motion Profile.
+- Triangular Motion Profile.
+- X/Y axis tuning sequence.
+- Dashboard configuration thông qua `@Config`.
+
+---
+
+## 2. Installation
+
+### Bước 1: Copy file
+
+Copy file:
+
+`BillyDriveLib.java`
+
+vào thư mục Java của FTC TeamCode.
+
+### Bước 2: Kiểm tra package
+
+Phiên bản hiện tại sử dụng package:
+
+```java
+package org.firstinspires.ftc.teamcode.JavaOnRobot.JavaOnRobot;
+```
+
+Nếu bạn đặt file ở package khác, hãy sửa dòng package cho phù hợp.
+
+### Bước 3: Import thư viện
+
+```java
+import org.firstinspires.ftc.teamcode.JavaOnRobot.JavaOnRobot.BillyDriveLib;
+```
+
+### Bước 4: Khởi tạo
+
+```java
+BillyDriveLib.BillyDrive drive =
+        new BillyDriveLib.BillyDrive(hardwareMap);
+```
+
+---
+
+## 3. Coordinate System
+
+BillyDriveLib sử dụng hệ tọa độ field:
+
+| Thành phần | Ý nghĩa |
+|---|---|
+| +X | Phía trước |
+| -X | Phía sau |
+| +Y | Bên phải |
+| -Y | Bên trái |
+| +Heading | Quay ngược chiều kim đồng hồ |
+| -Heading | Quay theo chiều kim đồng hồ |
+
+Heading được lưu nội bộ theo radian.
+
+Các hàm nhận góc thông qua `turnToDegrees()`, `turnTo()` và `lineToPose()` sử dụng đơn vị độ.
+
+Tọa độ vị trí sử dụng millimeter (mm).
+
+**Lưu ý:** Đây là hệ tọa độ field, không phải hệ tọa độ robot-centric.
+
+---
+
+## 4. Hardware Configuration
+
+Các thông số phần cứng nằm trong:
+
+```java
+BillyDriveLib.BillyDrive.ConfigValues
+```
+
+### 4.1. Motor Mapping
+
+| Parameter | Default | Description |
+|---|---|---|
+| LF_NAME | m2 | Left Front Motor |
+| RF_NAME | m4 | Right Front Motor |
+| LB_NAME | m1 | Left Back Motor |
+| RB_NAME | m3 | Right Back Motor |
+| IMU_NAME | imu | IMU device name |
+
+Có thể thay đổi tên motor trực tiếp trong Dashboard hoặc trong code trước khi khởi tạo thư viện.
+
+### 4.2. Motor Direction
+
+```java
+REVERSE_LF = true;
+REVERSE_RF = false;
+REVERSE_LB = true;
+REVERSE_RB = false;
+```
+
+Các giá trị này cần được kiểm tra theo cấu hình robot thực tế.
+
+### 4.3. Odometry Configuration
+
+```java
+MM_PER_TICK = 0.0502655;
+
+VERTICAL_SIGN = 1.0;
+HORIZONTAL_SIGN = 1.0;
+
+X_OFFSET_MM = 102.2281;
+Y_OFFSET_MM = 115.0326;
+```
+
+| Parameter | Description |
+|---|---|
+| MM_PER_TICK | Khoảng cách di chuyển trên mỗi encoder tick |
+| VERTICAL_SIGN | Chiều encoder dọc |
+| HORIZONTAL_SIGN | Chiều encoder ngang |
+| X_OFFSET_MM | Khoảng cách X từ tâm robot đến tracking center theo quy ước thư viện |
+| Y_OFFSET_MM | Khoảng cách Y từ tâm robot đến tracking center theo quy ước thư viện |
+
+Trong cấu hình mặc định:
+
+- Vertical encoder được lấy từ motor `m1/LB`.
+- Horizontal encoder được lấy từ motor `m4/RF`.
+
+### 4.4. IMU Orientation
+
+```java
+LOGO_FACING = RevHubOrientationOnRobot.LogoFacingDirection.RIGHT;
+
+USB_FACING = RevHubOrientationOnRobot.UsbFacingDirection.UP;
+```
+
+Cần điều chỉnh theo hướng lắp đặt Control Hub hoặc Expansion Hub trên robot.
+
+---
+
+## 5. Basic Drive API
+
+### 5.1. Go To
+
+Di chuyển đến một tọa độ X/Y và giữ nguyên heading hiện tại.
+
+```java
+drive.goTo(500, 300);
+```
+
+### 5.2. Go To Pose
+
+Di chuyển đến tọa độ và đồng thời điều khiển góc quay.
+
+```java
+drive.goToPose(500, 300, 90);
+```
+
+Trong ví dụ này:
+- X = 500 mm.
+- Y = 300 mm.
+- Heading = 90°.
+
+### 5.3. Turn To
+
+Quay đến một góc tuyệt đối.
+
+```java
+drive.turnToDegrees(90);
+```
+
+Hoặc sử dụng radian:
+
+```java
+drive.turnToRadians(Math.PI / 2);
+```
+
+### 5.4. Hold Pose
+
+Giữ vị trí và heading hiện tại.
+
+```java
+drive.holdPose();
+```
+
+### 5.5. Cancel
+
+Hủy chuyển động hiện tại và dừng các motor drive.
+
+```java
+drive.cancel();
+```
+
+### 5.6. Set Maximum Power
+
+```java
+drive.setMaxPowers(0.3, 0.2);
+```
+
+Tham số thứ nhất là giới hạn công suất di chuyển.
+
+Tham số thứ hai là giới hạn công suất quay.
+
+---
+
+## 6. Path Builder
+
+Path Builder là API chính để xây dựng Autonomous.
+
+Khởi tạo:
+
+```java
+drive.path()
+```
+
+Các lệnh có thể nối tiếp nhau bằng method chaining.
+
+### 6.1. Line To
+
+Di chuyển đến một tọa độ.
+
+```java
+drive.path()
+    .lineTo(500, 0)
+    .lineTo(500, 500)
+    .waitToFinish(this);
+```
+
+### 6.2. Line To Pose
+
+Di chuyển và xoay đồng thời.
+
+```java
+drive.path()
+    .lineToPose(500, 0, 90)
+    .waitToFinish(this);
+```
+
+### 6.3. Turn To
+
+Quay tại chỗ đến heading tuyệt đối.
+
+```java
+drive.path()
+    .turnTo(90)
+    .turnTo(180)
+    .turnTo(0)
+    .waitToFinish(this);
+```
+
+### 6.4. Spline To
+
+Tạo đường cong cubic Bezier.
+
+Cấu trúc:
+
+```java
+.splineTo(
+    control1X, control1Y,
+    control2X, control2Y,
+    endX, endY
+)
+```
+
+Ví dụ:
+
+```java
+drive.path()
+    .splineTo(
+        150, 0,
+        300, 250,
+        500, 300
+    )
+    .waitToFinish(this);
+```
+
+Bezier sử dụng:
+- Điểm bắt đầu: vị trí của robot khi gọi `path()`.
+- Control Point 1.
+- Control Point 2.
+- Điểm kết thúc.
+
+Các điểm được biểu diễn trong field coordinates.
+
+### 6.5. Wait To Finish
+
+Đây là phương thức thực thi toàn bộ path.
+
+```java
+drive.path()
+    .lineTo(500, 0)
+    .lineTo(500, 500)
+    .turnTo(90)
+    .waitToFinish(this);
+```
+
+Không cần tự viết vòng lặp `while`, `drive.update()` hoặc kiểm tra `isBusy()`.
+
+Có thể đặt timeout cho mỗi bước:
+
+```java
+drive.path()
+    .lineTo(500, 0)
+    .lineTo(500, 500)
+    .waitToFinish(this, 10);
+```
+
+Trong ví dụ này, mỗi bước có tối đa 10 giây.
+
+Mặc định là 15 giây cho mỗi bước.
+
+`waitToFinish()` trả về:
+- `true`: toàn bộ path hoàn thành.
+- `false`: OpMode bị dừng hoặc một bước không hoàn thành trong thời gian cho phép.
+
+---
+
+## 7. Action System
+
+Action System cho phép điều khiển các cơ cấu phụ trong lúc robot đang chạy Autonomous.
+
+Có hai cách sử dụng chính:
+
+1. Parallel Action: chạy action đồng thời với chuyển động.
+2. Sequential Action: chạy action sau khi bước trước đó hoàn thành.
+
+### 7.1. Parallel Action
+
+Sử dụng `.parallel()` ngay sau một bước chuyển động.
+
+```java
+drive.path()
+
+    .lineTo(500, 0)
+
+    .parallel(
+        BillyDriveLib.Actions.setServo(claw, 0.7)
+    )
+
+    .lineTo(1000, 0)
+
+    .waitToFinish(this);
+```
+
+Servo bắt đầu di chuyển đồng thời với đoạn `lineTo(500, 0)`.
+
+Path chỉ chuyển sang bước tiếp theo khi chuyển động và tất cả parallel actions của bước hiện tại đã hoàn thành.
+
+Có thể thêm nhiều action:
+
+```java
+.parallel(
+    BillyDriveLib.Actions.setServo(claw, 0.7),
+    BillyDriveLib.Actions.waitSeconds(0.5)
+)
+```
+
+### 7.2. Sequential Action
+
+Sử dụng `.then()` để chạy action sau khi bước chuyển động trước đó hoàn thành.
+
+```java
+drive.path()
+
+    .lineTo(500, 0)
+
+    .then(
+        BillyDriveLib.Actions.setServo(claw, 0.7)
+    )
+
+    .lineTo(1000, 0)
+
+    .waitToFinish(this);
+```
+
+Robot sẽ:
+1. Đi đến `(500, 0)`.
+2. Thực hiện action mở claw.
+3. Tiếp tục đi đến `(1000, 0)`.
+
+### 7.3. Wait Seconds
+
+Có thể sử dụng trực tiếp:
+
+```java
+drive.path()
+    .lineTo(500, 0)
+    .waitSeconds(0.5)
+    .lineTo(1000, 0)
+    .waitToFinish(this);
+```
+
+Hoặc:
+
+```java
+.then(
+    BillyDriveLib.Actions.waitSeconds(0.5)
+)
+```
+
+### 7.4. Instant Action
+
+Thực hiện một callback đúng một lần.
+
+```java
+.then(
+    BillyDriveLib.Actions.instant(() -> {
+        claw.setPosition(0.7);
+        arm.setPower(0);
+    })
+)
+```
+
+### 7.5. Group Parallel Actions
+
+Có thể kết hợp nhiều action bằng:
+
+```java
+BillyDriveLib.Actions.parallel(
+    action1,
+    action2,
+    action3
+)
+```
+
+Action nhóm hoàn thành khi tất cả action con hoàn thành.
+
+### 7.6. Custom Action
+
+Có thể tự tạo action bằng cách kế thừa class `Action`.
+
+```java
+BillyDriveLib.Action shootAction =
+    new BillyDriveLib.Action() {
+
+        @Override
+        public void start(
+                BillyDriveLib.BillyDrive drive) {
+
+            // Khởi tạo shooter
+        }
+
+        @Override
+        public void update(
+                BillyDriveLib.BillyDrive drive) {
+
+            // Cập nhật shooter liên tục
+
+            if (/* shooting completed */ false) {
+                finish();
+            }
+        }
+    };
+```
+
+Sử dụng:
+
+```java
+drive.path()
+    .lineTo(500, 0)
+    .then(shootAction)
+    .lineTo(1000, 0)
+    .waitToFinish(this);
+```
+
+Các action sử dụng cooperative update:
+- `start()` được gọi một lần.
+- `update()` được gọi liên tục.
+- `finish()` báo action đã hoàn thành.
+- `cancel()` xử lý khi action bị hủy.
+
+Không tạo thread riêng cho từng action.
+
+---
+
+## 8. Complete Autonomous Example
+
+Ví dụ kết hợp pathing, heading control và servo action.
+
+```java
+@Autonomous(name = "BillyDrive Example")
+public class BillyDriveExample extends LinearOpMode {
+
+    @Override
+    public void runOpMode() {
+
+        BillyDriveLib.BillyDrive drive =
+            new BillyDriveLib.BillyDrive(hardwareMap);
+
+        Servo claw =
+            hardwareMap.get(Servo.class, "claw");
+
+        drive.setMaxPowers(0.25, 0.18);
+
+        waitForStart();
+
+        if (isStopRequested()) return;
+
+        boolean success = drive.path()
+
+            // Đi lên 500mm
+            .lineTo(500, 0)
+
+            // Vừa di chuyển vừa quay trái 90 độ
+            .lineToPose(1000, 0, 90)
+
+            // Chạy đường cong Bezier
+            .splineTo(
+                1150, 0,
+                1300, 250,
+                1500, 350
+            )
+
+            // Mở claw trong lúc chạy đoạn cong
+            .parallel(
+                BillyDriveLib.Actions.setServo(claw, 0.7)
+            )
+
+            // Chờ 0.5 giây
+            .waitSeconds(0.5)
+
+            // Trở về vị trí ban đầu
+            .lineToPose(0, 0, 0)
+
+            // Thực thi toàn bộ
+            .waitToFinish(this);
+
+        telemetry.addData("Path Result",
+                success ? "SUCCESS" : "STOPPED");
+
+        telemetry.update();
+    }
+}
+```
+
+---
+
+## 9. PIDF Configuration
+
+Các thông số PIDF có thể chỉnh trong:
+
+```java
+BillyDriveLib.BillyDrive.ConfigValues
+```
+
+### 9.1. X Controller
+
+```java
+X_P = 0.0014;
+X_I = 0;
+X_D = 0;
+X_F = 0.00062;
+```
+
+### 9.2. Y Controller
+
+```java
+Y_P = 0.0014;
+Y_I = 0;
+Y_D = 0;
+Y_F = 0.00062;
+```
+
+### 9.3. Turn Controller
+
+```java
+TURN_P = 0.9;
+TURN_I = 0;
+TURN_D = 0.04;
+TURN_F = 0.045;
+```
+
+### 9.4. Motion Constraints
+
+```java
+MAX_MOVE_POWER = 0.30;
+MAX_TURN_POWER = 0.22;
+
+MAX_VELOCITY_MM_S = 250;
+MAX_ACCEL_MM_S2 = 450;
+```
+
+### 9.5. Tolerance
+
+```java
+POSITION_TOLERANCE_MM = 12;
+HEADING_TOLERANCE_DEG = 2;
+
+SETTLE_VELOCITY_MM_S = 15;
+SETTLE_ANGULAR_VELOCITY_DEG_S = 8;
+```
+
+Các controller được cập nhật gain từ `ConfigValues` trong mỗi lần gọi `update()`.
+
+---
+
+## 10. Odometry API
+
+### 10.1. Get Pose
+
+```java
+BillyDriveLib.Pose2D pose = drive.getPose();
+
+double x = pose.x;
+double y = pose.y;
+double heading = pose.heading;
+```
+
+Heading trả về theo radian.
+
+### 10.2. Reset Pose
+
+```java
+drive.resetPose();
+```
+
+Đặt lại tọa độ pose về gốc và đồng bộ encoder/IMU hiện tại.
+
+### 10.3. Offset Calibration
+
+Bắt đầu hiệu chỉnh:
+
+```java
+drive.beginOffsetCalibration();
+```
+
+Trong quá trình robot quay chậm tại chỗ, thu thập dữ liệu:
+
+```java
+drive.collectOffsetCalibrationSample();
+```
+
+Lấy kết quả:
+
+```java
+double[] offsets = drive.getCalibratedOffsets();
+
+double xOffset = offsets[0];
+double yOffset = offsets[1];
+```
+
+Áp dụng kết quả:
+
+```java
+drive.applyCalibratedOffsets();
+```
+
+Có thể xem số mẫu:
+
+```java
+int samples = drive.getOffsetCalibrationSamples();
+```
+
+Tổng góc quay tích lũy:
+
+```java
+double rotation =
+    drive.getOffsetCalibrationRotationRad();
+```
+
+**Lưu ý:** Khi hiệu chỉnh offset, robot cần quay chậm và gần như tại chỗ. Không chủ động di chuyển tịnh tiến trong quá trình lấy mẫu.
+
+---
+
+## 11. Axis Tuning
+
+BillyDrive có sẵn chuỗi chuyển động tự động để hỗ trợ chỉnh PIDF trục X/Y.
+
+```java
+drive.startAxisTune(300, 0.18);
+```
+
+Chuỗi chuyển động:
+
+1. X+
+2. X-
+3. Center
+4. Y+
+5. Y-
+6. Center
+
+Các thông số theo dõi:
+
+```java
+drive.getTuneStep();
+
+drive.getReferenceX();
+
+drive.getReferenceY();
+
+drive.getReferenceVelocity();
+```
+
+Cần gọi `drive.update()` liên tục trong OpMode để chuỗi tuning hoạt động.
+
+---
+
+## 12. Important Notes
+
+### 12.1. Update Loop
+
+Có hai cách sử dụng:
+
+**Cách 1: Điều khiển thủ công**
+
+```java
+while (opModeIsActive() && drive.isBusy()) {
+    drive.update();
+    idle();
+}
+```
+
+**Cách 2: Sử dụng PathBuilder**
+
+```java
+drive.path()
+    .lineTo(500, 0)
+    .waitToFinish(this);
+```
+
+Khi dùng `PathBuilder.waitToFinish()`, thư viện tự quản lý vòng lặp update.
+
+Không gọi `drive.update()` từ thread khác trong lúc `waitToFinish()` đang chạy.
+
+### 12.2. OpMode Stop
+
+`waitToFinish()` kiểm tra trạng thái OpMode. Khi OpMode bị dừng hoặc một bước timeout, chuyển động sẽ bị hủy và motor drive được dừng.
+
+### 12.3. Timeout
+
+Timeout mặc định là 15 giây cho mỗi bước path.
+
+Có thể thay đổi:
+
+```java
+.waitToFinish(this, 10);
+```
+
+Giá trị này là timeout cho từng bước, không phải tổng thời gian của toàn bộ Autonomous.
+
+### 12.4. Bezier Heading
+
+Bezier hiện điều khiển đường đi X/Y và giữ heading hiện tại. Nó không tự động xoay robot theo tiếp tuyến của đường cong.
+
+Nếu cần thay đổi heading, hãy thêm `lineToPose()` hoặc `turnTo()` ở bước phù hợp.
+
+### 12.5. Hardware Safety
+
+Trước khi chạy Autonomous:
+- Kiểm tra chiều quay motor.
+- Kiểm tra encoder sign.
+- Kiểm tra IMU orientation.
+- Kiểm tra X/Y offset.
+- Kiểm tra PIDF.
+- Giảm công suất khi chạy thử lần đầu.
+- Đảm bảo robot có đủ không gian di chuyển.
+
+---
+
+## 13. Library Structure
+
+Toàn bộ thư viện được gói trong một file Java:
+
+```text
+BillyDriveLib.java
+│
+├── BillyDriveLib
+│
+├── Action
+│   └── Actions
+│       ├── instant()
+│       ├── waitSeconds()
+│       ├── setServo()
+│       └── parallel()
+│
+├── BillyDrive
+│   ├── ConfigValues
+│   ├── Drive Controller
+│   ├── Odometry Integration
+│   ├── PIDF Control
+│   ├── Motion Profile
+│   └── Axis Tuning
+│
+├── PathBuilder
+│   ├── lineTo()
+│   ├── lineToPose()
+│   ├── turnTo()
+│   ├── splineTo()
+│   ├── parallel()
+│   ├── then()
+│   ├── waitSeconds()
+│   └── waitToFinish()
+│
+├── Pose2D
+├── PIDFController
+├── MotionProfile
+├── BezierCurve
+└── Odometry
+```
+
+---
+
+## 14. Dependencies
+
+Thư viện sử dụng các API từ:
+- FTC SDK.
+- REV Hardware API.
+- FTC Dashboard (`@Config`).
+
+Các import chính:
+
+```java
+import com.acmerobotics.dashboard.config.Config;
+
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.IMU;
+
+import com.qualcomm.robotcore.util.ElapsedTime;
+```
+
+---
+
+## 15. Current Limitations
+
+Phiên bản hiện tại có một số giới hạn cần lưu ý:
+
+- `splineTo()` sử dụng cubic Bezier với một cặp control point và một endpoint.
+- Bezier controller sử dụng lookahead theo tham số đường cong.
+- Bezier chưa hỗ trợ thay đổi heading theo tangent.
+- Các bước path được thực thi tuần tự; parallel actions chỉ chạy đồng thời với bước chuyển động tương ứng.
+- Không có cơ chế tự động lưu offset calibration xuống bộ nhớ lâu dài.
+- Các thông số PIDF cần được tuning trên robot thực tế.
+- Axis tuning cần có OpMode riêng để gọi `update()` liên tục.
+- Không nên chạy nhiều vòng điều khiển phần cứng cùng lúc từ nhiều thread.
+
+---
+
+**BillyDriveLib — A simple and extensible FTC autonomous pathing system.**
