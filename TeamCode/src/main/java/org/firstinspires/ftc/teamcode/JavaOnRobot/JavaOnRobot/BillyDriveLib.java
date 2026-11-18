@@ -170,6 +170,14 @@ public final class BillyDriveLib {
 
         public enum Mode { IDLE, GO_TO, TURN, BEZIER, HOLD, AXIS_TUNE }
 
+        /** Heading behavior while following a Bezier curve. */
+        public enum HeadingMode {
+            /** Keep the robot's heading from the instant followPath() starts. */
+            CONSTANT,
+            /** Interpolate the heading linearly from p0.heading to p3.heading. */
+            LINEAR
+        }
+
         private final DcMotor lf, rf, lb, rb;
         private final IMU imu;
         private final Odometry odometry;
@@ -184,6 +192,8 @@ public final class BillyDriveLib {
         private double previousX, previousY, previousHeading, lastTime, currentAngularVelocity;
         private double bezierT;
         private BezierCurve path;
+        private HeadingMode headingMode = HeadingMode.CONSTANT;
+        private double pathStartHeadingRad, pathEndHeadingRad;
         private int settledSamples;
         private double maxMovePower = ConfigValues.MAX_MOVE_POWER;
         private double maxTurnPower = ConfigValues.MAX_TURN_POWER;
@@ -306,11 +316,36 @@ public final class BillyDriveLib {
             beginMode(Mode.HOLD);
         }
 
+        /**
+         * Follow a Bezier curve while keeping the heading captured at path start.
+         * This preserves the behavior of the original API.
+         */
         public void followPath(BezierCurve curve) {
+            followPath(curve, HeadingMode.CONSTANT);
+        }
+
+        /**
+         * Follow a Bezier curve with a selected heading behavior.
+         * For LINEAR, p0.heading and p3.heading are interpreted as DEGREES;
+         * the intermediate control-point headings p1/p2 are not used.
+         */
+        public void followPath(BezierCurve curve, HeadingMode requestedHeadingMode) {
             if (curve == null) throw new IllegalArgumentException("BezierCurve cannot be null");
+            if (requestedHeadingMode == null) throw new IllegalArgumentException("HeadingMode cannot be null");
+
             path = curve;
             bezierT = 0;
-            targetHeading = getPose().heading;
+            headingMode = requestedHeadingMode;
+
+            if (headingMode == HeadingMode.LINEAR) {
+                pathStartHeadingRad = Math.toRadians(curve.p0.heading);
+                pathEndHeadingRad = Math.toRadians(curve.p3.heading);
+                targetHeading = Pose2D.wrap(pathStartHeadingRad);
+            } else {
+                pathStartHeadingRad = getPose().heading;
+                pathEndHeadingRad = pathStartHeadingRad;
+                targetHeading = pathStartHeadingRad;
+            }
             beginMode(Mode.BEZIER);
         }
 
@@ -330,14 +365,24 @@ public final class BillyDriveLib {
             return waitForFinish(opMode, 15.0);
         }
 
-        public void cancel() { stopMotors(); mode = Mode.IDLE; path = null; resetControllers(); }
+        public void cancel() {
+            stopMotors();
+            mode = Mode.IDLE;
+            path = null;
+            headingMode = HeadingMode.CONSTANT;
+            resetControllers();
+        }
         public void stop() { cancel(); }
         public boolean isBusy() { return mode != Mode.IDLE; }
         public Mode getMode() { return mode; }
         public Pose2D getPose() { return odometry.getPose(); }
         public double getTargetX() { return targetX; }
         public double getTargetY() { return targetY; }
+        /** Target heading in radians. */
         public double getTargetHeading() { return targetHeading; }
+        /** Target heading in degrees, convenient for FTC Dashboard telemetry. */
+        public double getTargetHeadingDegrees() { return Math.toDegrees(targetHeading); }
+        public HeadingMode getHeadingMode() { return headingMode; }
         public double getPathT() { return bezierT; }
 
         public void resetPose() {
@@ -450,6 +495,13 @@ public final class BillyDriveLib {
 
         private void updateBezier(Pose2D pose, double vx, double vy, double dt) {
             bezierT = Math.max(bezierT, path.closestT(pose.x, pose.y, bezierT));
+
+            // Update the heading target from the robot's progress along the curve.
+            if (headingMode == HeadingMode.LINEAR) {
+                double headingDelta = Pose2D.wrap(pathEndHeadingRad - pathStartHeadingRad);
+                targetHeading = Pose2D.wrap(pathStartHeadingRad + headingDelta * bezierT);
+            }
+
             Pose2D aim = path.point(Math.min(1, bezierT + ConfigValues.BEZIER_LOOKAHEAD_T));
             double dx = aim.x - pose.x;
             double dy = aim.y - pose.y;
@@ -458,11 +510,20 @@ public final class BillyDriveLib {
                 dx = path.p3.x - pose.x;
                 dy = path.p3.y - pose.y;
             }
+
             updateTranslation(dx, dy, vx, vy, dt, desiredVelocity(Math.hypot(dx, dy)));
-            if (isTranslationSettled(endDistance, Math.hypot(vx, vy))) {
+
+            boolean positionSettled = isTranslationSettled(endDistance, Math.hypot(vx, vy));
+            double headingError = Math.abs(Pose2D.wrap(targetHeading - pose.heading));
+            boolean headingSettled = headingError <= Math.toRadians(ConfigValues.HEADING_TOLERANCE_DEG)
+                    && Math.abs(Math.toDegrees(currentAngularVelocity))
+                    <= ConfigValues.SETTLE_ANGULAR_VELOCITY_DEG_S;
+
+            if (positionSettled && headingSettled) {
                 stopMotors();
                 if (++settledSamples >= 6) {
                     path = null;
+                    headingMode = HeadingMode.CONSTANT;
                     finishMotion();
                 }
             } else {
