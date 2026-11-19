@@ -18,11 +18,13 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * BillyDriveLib v2.0 - continuous trajectory foundation with selectable Pinpoint odometry.
+ * BillyDriveLib v2.1 - integrated motion planning and control library.
  *
- * v2.0 foundation: selectable goBILDA Pinpoint / legacy odometry, cached PID gains,
- * and a shared pose convention. Trajectory planner remains based on v1.3 composite
- * Pure Pursuit and is intended for staged validation before adding jerk-limited profiles.
+ * Includes selectable Pinpoint / legacy odometry, composite Pure Pursuit,
+ * precomputed curvature- and acceleration-limited velocity profiles, a spatial
+ * jerk-limiting pass, velocity/acceleration feedforward, and distance-triggered
+ * parallel action markers. Trajectory planning is performed before motion.
+ *
  *
  * Coordinate convention inherited from the supplied library:
  *   +X = robot/field forward at heading 0
@@ -181,6 +183,8 @@ public final class BillyDriveLib {
 
             public static double X_P = 0.0014, X_I = 0, X_D = 0, X_F = 0.00062;
             public static double Y_P = 0.0014, Y_I = 0, Y_D = 0, Y_F = 0.00062;
+            /** Optional acceleration feedforward; keep at 0 until characterized. */
+            public static double X_A = 0.0, Y_A = 0.0;
             public static double TURN_P = 0.9, TURN_I = 0, TURN_D = 0.04, TURN_F = 0.045;
             public static double MAX_MOVE_POWER = 0.30, MAX_TURN_POWER = 0.22;
             public static double MAX_VELOCITY_MM_S = 250, MAX_ACCEL_MM_S2 = 450;
@@ -196,6 +200,10 @@ public final class BillyDriveLib {
             public static double PP_MAX_VELOCITY_MM_S = 450;
             public static double PP_MAX_ACCEL_MM_S2 = 900;
             public static double PP_MAX_LATERAL_ACCEL_MM_S2 = 1000;
+            /** Maximum change of tangential acceleration, mm/s^3. */
+            public static double PP_MAX_JERK_MM_S3 = 4500;
+            /** Odd moving-average window for curvature; 1 disables smoothing. */
+            public static int PP_CURVATURE_SMOOTHING_WINDOW = 5;
             public static double PP_END_TOLERANCE_MM = 18;
             public static double PP_PROGRESS_SEARCH_WINDOW_MM = 350;
             public static int PP_LINE_SAMPLES = 30;
@@ -222,8 +230,8 @@ public final class BillyDriveLib {
         private final boolean usePinpoint;
         private final Pose2D pinpointPose = new Pose2D(0, 0, 0);
         private boolean gainsDirty = true;
-        private double cachedXP, cachedXI, cachedXD, cachedXF;
-        private double cachedYP, cachedYI, cachedYD, cachedYF;
+        private double cachedXP, cachedXI, cachedXD, cachedXF, cachedXA;
+        private double cachedYP, cachedYI, cachedYD, cachedYF, cachedYA;
         private double cachedTP, cachedTI, cachedTD, cachedMoveILimit, cachedTurnILimit;
         private final PIDFController xController = new PIDFController(0, 0, 0, 0);
         private final PIDFController yController = new PIDFController(0, 0, 0, 0);
@@ -651,8 +659,13 @@ public final class BillyDriveLib {
             double desiredVy = pp.tangentY * pp.velocity
                     + ConfigValues.PP_CORRECTION_GAIN * errorY;
 
+            // Tangential + centripetal acceleration reference in field coordinates.
+            double normalAccel = pp.velocity * pp.velocity * pp.curvature;
+            double desiredAx = pp.tangentX * pp.acceleration - pp.tangentY * normalAccel;
+            double desiredAy = pp.tangentY * pp.acceleration + pp.tangentX * normalAccel;
+
             updateTranslationVelocity(errorX, errorY, vx, vy,
-                    desiredVx, desiredVy, dt);
+                    desiredVx, desiredVy, desiredAx, desiredAy, dt);
 
             double endDistance = Math.hypot(pp.endPoint.x - pose.x, pp.endPoint.y - pose.y);
             boolean positionSettled = pp.finished
@@ -680,9 +693,12 @@ public final class BillyDriveLib {
         private void updateTranslationVelocity(double errorX, double errorY,
                                                double vx, double vy,
                                                double desiredVx, double desiredVy,
+                                               double desiredAx, double desiredAy,
                                                double dt) {
-            double outX = xController.update(errorX, vx, desiredVx, dt, maxMovePower);
-            double outY = yController.update(errorY, vy, desiredVy, dt, maxMovePower);
+            double outX = xController.update(errorX, vx, desiredVx, dt, maxMovePower)
+                    + ConfigValues.X_A * desiredAx;
+            double outY = yController.update(errorY, vy, desiredVy, dt, maxMovePower)
+                    + ConfigValues.Y_A * desiredAy;
 
             double magnitude = Math.hypot(outX, outY);
             if (magnitude > maxMovePower && magnitude > 1e-9) {
@@ -776,8 +792,10 @@ public final class BillyDriveLib {
             // Dashboard-friendly without rewriting controller gains every loop.
             if (!gainsDirty && cachedXP == ConfigValues.X_P && cachedXI == ConfigValues.X_I
                     && cachedXD == ConfigValues.X_D && cachedXF == ConfigValues.X_F
+                    && cachedXA == ConfigValues.X_A
                     && cachedYP == ConfigValues.Y_P && cachedYI == ConfigValues.Y_I
                     && cachedYD == ConfigValues.Y_D && cachedYF == ConfigValues.Y_F
+                    && cachedYA == ConfigValues.Y_A
                     && cachedTP == ConfigValues.TURN_P && cachedTI == ConfigValues.TURN_I
                     && cachedTD == ConfigValues.TURN_D
                     && cachedMoveILimit == ConfigValues.MOVE_INTEGRAL_LIMIT
@@ -788,8 +806,8 @@ public final class BillyDriveLib {
             xController.setIntegralLimit(ConfigValues.MOVE_INTEGRAL_LIMIT);
             yController.setIntegralLimit(ConfigValues.MOVE_INTEGRAL_LIMIT);
             turnController.setIntegralLimit(ConfigValues.TURN_INTEGRAL_LIMIT);
-            cachedXP=ConfigValues.X_P; cachedXI=ConfigValues.X_I; cachedXD=ConfigValues.X_D; cachedXF=ConfigValues.X_F;
-            cachedYP=ConfigValues.Y_P; cachedYI=ConfigValues.Y_I; cachedYD=ConfigValues.Y_D; cachedYF=ConfigValues.Y_F;
+            cachedXP=ConfigValues.X_P; cachedXI=ConfigValues.X_I; cachedXD=ConfigValues.X_D; cachedXF=ConfigValues.X_F; cachedXA=ConfigValues.X_A;
+            cachedYP=ConfigValues.Y_P; cachedYI=ConfigValues.Y_I; cachedYD=ConfigValues.Y_D; cachedYF=ConfigValues.Y_F; cachedYA=ConfigValues.Y_A;
             cachedTP=ConfigValues.TURN_P; cachedTI=ConfigValues.TURN_I; cachedTD=ConfigValues.TURN_D;
             cachedMoveILimit=ConfigValues.MOVE_INTEGRAL_LIMIT; cachedTurnILimit=ConfigValues.TURN_INTEGRAL_LIMIT;
             gainsDirty = false;
@@ -829,6 +847,17 @@ public final class BillyDriveLib {
             BezierCurve curve;
             Action action;
             final List<Action> parallelActions = new ArrayList<>();
+        }
+
+        private static final class ActionMarker {
+            final double pathDistance;
+            final List<Action> actions;
+            boolean triggered;
+
+            ActionMarker(double pathDistance, List<Action> actions) {
+                this.pathDistance = pathDistance;
+                this.actions = new ArrayList<>(actions);
+            }
         }
 
         private final BillyDrive drive;
@@ -945,21 +974,53 @@ public final class BillyDriveLib {
         }
 
         private boolean runContinuousGeometry(List<BezierCurve> curves,
+                                              List<ActionMarker> markers,
                                               LinearOpMode opMode,
                                               double timeoutSeconds) {
             if (curves.isEmpty()) return true;
             drive.followPath(curves);
             ElapsedTime timer = new ElapsedTime();
-            while (opMode.opModeIsActive() && drive.isBusy()
-                    && timer.seconds() < timeoutSeconds) {
-                drive.update();
+            while (opMode.opModeIsActive() && timer.seconds() < timeoutSeconds) {
+                if (drive.isBusy()) drive.update();
+                double progress = drive.getPathProgressMm();
+                boolean allMarkersDone = true;
+
+                for (ActionMarker marker : markers) {
+                    if (!marker.triggered && progress >= marker.pathDistance) {
+                        marker.triggered = true;
+                        for (Action action : marker.actions) action.startInternal(drive);
+                    }
+                    if (marker.triggered) {
+                        for (Action action : marker.actions) {
+                            action.updateInternal(drive);
+                            if (!action.isFinished()) allMarkersDone = false;
+                        }
+                    } else {
+                        allMarkersDone = false;
+                    }
+                }
+
+                if (!drive.isBusy() && allMarkersDone) return true;
                 opMode.idle();
             }
-            if (!opMode.opModeIsActive() || drive.isBusy()) {
-                drive.cancel();
-                return false;
+
+            for (ActionMarker marker : markers) {
+                for (Action action : marker.actions) action.cancelInternal(drive);
             }
-            return true;
+            drive.cancel();
+            return false;
+        }
+
+        private double estimateCurveLength(BezierCurve curve) {
+            final int samples = Math.max(40, BillyDrive.ConfigValues.PP_SAMPLES);
+            Pose2D previous = curve.point(0.0);
+            double length = 0.0;
+            for (int i = 1; i <= samples; i++) {
+                Pose2D current = curve.point((double) i / samples);
+                length += Math.hypot(current.x - previous.x, current.y - previous.y);
+                previous = current;
+            }
+            return length;
         }
 
         /** Execute all path steps with a timeout per step. Returns false if stopped/timed out. */
@@ -1003,40 +1064,41 @@ public final class BillyDriveLib {
                 // No intermediate stop is commanded at their joins.
                 if (step.type == StepType.LINE || step.type == StepType.BEZIER) {
                     List<BezierCurve> continuousCurves = new ArrayList<>();
+                    List<ActionMarker> markers = new ArrayList<>();
                     int j = i;
                     double cursorX = drive.getPose().x;
                     double cursorY = drive.getPose().y;
-                    boolean canBatch = true;
+                    double cumulativeLength = 0.0;
 
                     while (j < steps.size()) {
                         PathStep candidate = steps.get(j);
                         if (candidate.type != StepType.LINE && candidate.type != StepType.BEZIER)
                             break;
-                        // Preserve existing parallel-action semantics; these steps
-                        // execute individually rather than moving their trigger time.
-                        if (!candidate.parallelActions.isEmpty()) {
-                            canBatch = false;
-                            break;
-                        }
 
+                        BezierCurve curve;
                         if (candidate.type == StepType.LINE) {
-                            continuousCurves.add(makeLineCurve(
-                                    cursorX, cursorY, candidate.x, candidate.y));
+                            curve = makeLineCurve(cursorX, cursorY, candidate.x, candidate.y);
                             cursorX = candidate.x;
                             cursorY = candidate.y;
                         } else {
-                            BezierCurve curve = candidate.curve;
-                            // Keep the authored Bezier control points; its p0 is the
-                            // previous planned endpoint from PathBuilder construction.
-                            continuousCurves.add(curve);
+                            curve = candidate.curve;
                             cursorX = curve.p3.x;
                             cursorY = curve.p3.y;
                         }
+
+                        // parallel() belongs to this motion step: trigger its
+                        // actions when this segment begins, without stopping motion.
+                        if (!candidate.parallelActions.isEmpty()) {
+                            markers.add(new ActionMarker(cumulativeLength,
+                                    candidate.parallelActions));
+                        }
+                        continuousCurves.add(curve);
+                        cumulativeLength += estimateCurveLength(curve);
                         j++;
                     }
 
-                    if (canBatch && j > i) {
-                        if (!runContinuousGeometry(continuousCurves, opMode,
+                    if (j > i) {
+                        if (!runContinuousGeometry(continuousCurves, markers, opMode,
                                 timeoutPerStepSeconds * (j - i))) {
                             drive.cancel();
                             return false;
@@ -1252,16 +1314,18 @@ public final class BillyDriveLib {
         public static final class Output {
             public final Pose2D lookahead;
             public final Pose2D endPoint;
-            public final double t, velocity, tangentX, tangentY, curvature;
+            public final double t, velocity, acceleration, tangentX, tangentY, curvature;
             public final boolean finished;
 
             private Output(Pose2D lookahead, Pose2D endPoint, double t,
-                           double velocity, double tangentX, double tangentY,
+                           double velocity, double acceleration,
+                           double tangentX, double tangentY,
                            double curvature, boolean finished) {
                 this.lookahead = lookahead;
                 this.endPoint = endPoint;
                 this.t = t;
                 this.velocity = velocity;
+                this.acceleration = acceleration;
                 this.tangentX = tangentX;
                 this.tangentY = tangentY;
                 this.curvature = curvature;
@@ -1269,7 +1333,7 @@ public final class BillyDriveLib {
             }
         }
 
-        private final double[] xs, ys, ss, curvatures, velocityProfile;
+        private final double[] xs, ys, ss, curvatures, smoothCurvatures, velocityProfile;
         private final int count;
         private final double pathLength;
         private double progressS;
@@ -1278,6 +1342,7 @@ public final class BillyDriveLib {
         private double cachedMaxVelocity = Double.NaN;
         private double cachedMaxAcceleration = Double.NaN;
         private double cachedMaxLateralAcceleration = Double.NaN;
+        private double cachedMaxJerk = Double.NaN;
 
         public PurePursuitFollower(BezierCurve curve, int samples) {
             this(singleton(curve), samples);
@@ -1309,6 +1374,7 @@ public final class BillyDriveLib {
             ys = new double[count];
             ss = new double[count];
             curvatures = new double[count];
+            smoothCurvatures = new double[count];
             velocityProfile = new double[count];
 
             for (int i = 0; i < count; i++) {
@@ -1340,52 +1406,111 @@ public final class BillyDriveLib {
                 double a = Math.hypot(ax, ay);
                 double b = Math.hypot(bx, by);
                 double c = Math.hypot(cx, cy);
-                double cross = Math.abs(ax * by - ay * bx);
+                double cross = ax * by - ay * bx;
                 double denominator = a * b * c;
                 curvatures[i] = denominator > 1e-8 ? 2.0 * cross / denominator : 0.0;
             }
             curvatures[0] = curvatures[1];
             curvatures[count - 1] = curvatures[count - 2];
+
+            int window = Math.max(1, BillyDrive.ConfigValues.PP_CURVATURE_SMOOTHING_WINDOW);
+            if ((window & 1) == 0) window++;
+            int radius = window / 2;
+            for (int i = 0; i < count; i++) {
+                double sum = 0.0;
+                int weightSum = 0;
+                for (int j = Math.max(0, i - radius); j <= Math.min(count - 1, i + radius); j++) {
+                    int weight = radius + 1 - Math.abs(j - i);
+                    sum += curvatures[j] * weight;
+                    weightSum += weight;
+                }
+                smoothCurvatures[i] = weightSum > 0 ? sum / weightSum : curvatures[i];
+            }
         }
 
         private void buildVelocityProfile(double maxVelocity, double maxAcceleration,
                                           double maxLateralAcceleration) {
+            double maxJerk = Math.max(1.0, BillyDrive.ConfigValues.PP_MAX_JERK_MM_S3);
             if (Double.compare(cachedMaxVelocity, maxVelocity) == 0
                     && Double.compare(cachedMaxAcceleration, maxAcceleration) == 0
-                    && Double.compare(cachedMaxLateralAcceleration, maxLateralAcceleration) == 0) {
+                    && Double.compare(cachedMaxLateralAcceleration, maxLateralAcceleration) == 0
+                    && Double.compare(cachedMaxJerk, maxJerk) == 0) {
                 return;
             }
             cachedMaxVelocity = maxVelocity;
             cachedMaxAcceleration = maxAcceleration;
             cachedMaxLateralAcceleration = maxLateralAcceleration;
+            cachedMaxJerk = maxJerk;
 
             for (int i = 0; i < count; i++) {
-                double k = Math.abs(curvatures[i]);
+                double k = Math.abs(smoothCurvatures[i]);
                 double curveLimit = k > 1e-8
                         ? Math.sqrt(maxLateralAcceleration / k)
                         : maxVelocity;
                 velocityProfile[i] = Math.min(maxVelocity, curveLimit);
             }
 
-            // End of a path segment is a stop only when the PathBuilder has
-            // an ACTION barrier (or this is the final trajectory).
             velocityProfile[0] = 0.0;
             velocityProfile[count - 1] = 0.0;
 
-            // Backward pass: ensure enough distance remains to brake.
+            // Acceleration and braking reachability.
             for (int i = count - 2; i >= 0; i--) {
                 double ds = Math.max(0.0, ss[i + 1] - ss[i]);
                 double reachable = Math.sqrt(velocityProfile[i + 1] * velocityProfile[i + 1]
                         + 2.0 * maxAcceleration * ds);
                 velocityProfile[i] = Math.min(velocityProfile[i], reachable);
             }
-
-            // Forward pass: acceleration limit.
             for (int i = 1; i < count; i++) {
                 double ds = Math.max(0.0, ss[i] - ss[i - 1]);
                 double reachable = Math.sqrt(velocityProfile[i - 1] * velocityProfile[i - 1]
                         + 2.0 * maxAcceleration * ds);
                 velocityProfile[i] = Math.min(velocityProfile[i], reachable);
+            }
+
+            // Spatial jerk-limited passes. They constrain the rate of change
+            // of tangential acceleration while preserving the velocity envelope.
+            for (int pass = 0; pass < 4; pass++) {
+                double previousAcceleration = 0.0;
+                for (int i = 1; i < count; i++) {
+                    double ds = Math.max(1e-6, ss[i] - ss[i - 1]);
+                    double v0 = velocityProfile[i - 1];
+                    double v1 = velocityProfile[i];
+                    double dt = 2.0 * ds / Math.max(1.0, v0 + v1);
+                    double allowed = Math.min(maxAcceleration,
+                            previousAcceleration + maxJerk * dt);
+                    double actual = (v1 * v1 - v0 * v0) / (2.0 * ds);
+                    if (actual > allowed) {
+                        velocityProfile[i] = Math.min(v1,
+                                Math.sqrt(Math.max(0.0, v0 * v0 + 2.0 * allowed * ds)));
+                        actual = (velocityProfile[i] * velocityProfile[i] - v0 * v0) / (2.0 * ds);
+                    }
+                    previousAcceleration = clamp(actual, -maxAcceleration, maxAcceleration);
+                }
+
+                double previousDeceleration = 0.0;
+                for (int i = count - 2; i >= 0; i--) {
+                    double ds = Math.max(1e-6, ss[i + 1] - ss[i]);
+                    double v1 = velocityProfile[i + 1];
+                    double v0 = velocityProfile[i];
+                    double dt = 2.0 * ds / Math.max(1.0, v0 + v1);
+                    double allowed = Math.min(maxAcceleration,
+                            previousDeceleration + maxJerk * dt);
+                    double actual = (v0 * v0 - v1 * v1) / (2.0 * ds);
+                    if (actual > allowed) {
+                        velocityProfile[i] = Math.min(v0,
+                                Math.sqrt(Math.max(0.0, v1 * v1 + 2.0 * allowed * ds)));
+                        actual = (velocityProfile[i] * velocityProfile[i] - v1 * v1) / (2.0 * ds);
+                    }
+                    previousDeceleration = Math.max(0.0, actual);
+                }
+
+                // Re-apply forward reachability after jerk reductions.
+                for (int i = 1; i < count; i++) {
+                    double ds = Math.max(0.0, ss[i] - ss[i - 1]);
+                    double reachable = Math.sqrt(velocityProfile[i - 1] * velocityProfile[i - 1]
+                            + 2.0 * maxAcceleration * ds);
+                    velocityProfile[i] = Math.min(velocityProfile[i], reachable);
+                }
             }
         }
 
@@ -1429,13 +1554,14 @@ public final class BillyDriveLib {
             double tangentY = tm > 1e-6 ? ty / tm : 0.0;
 
             int idx = lowerBound(ss, progressS);
-            currentCurvature = curvatures[Math.min(count - 1, idx)];
+            currentCurvature = smoothCurvatures[Math.min(count - 1, idx)];
             double velocity = velocityAt(progressS);
+            double acceleration = accelerationAt(progressS);
             boolean finished = progressS >= pathLength - 2.0;
 
             return new Output(lookahead, new Pose2D(xs[count - 1], ys[count - 1], 0),
                     pathLength > 1e-9 ? progressS / pathLength : 1.0,
-                    velocity, tangentX, tangentY, currentCurvature, finished);
+                    velocity, acceleration, tangentX, tangentY, currentCurvature, finished);
         }
 
         private double velocityAt(double distance) {
@@ -1445,6 +1571,16 @@ public final class BillyDriveLib {
             double span = ss[i] - ss[i - 1];
             double f = span > 1e-9 ? (distance - ss[i - 1]) / span : 0.0;
             return velocityProfile[i - 1] + (velocityProfile[i] - velocityProfile[i - 1]) * f;
+        }
+
+        private double accelerationAt(double distance) {
+            double ds = Math.max(2.0, Math.min(12.0, pathLength / Math.max(20, count)));
+            double s0 = Math.max(0.0, distance - ds);
+            double s1 = Math.min(pathLength, distance + ds);
+            if (s1 - s0 < 1e-6) return 0.0;
+            double v0 = velocityAt(s0);
+            double v1 = velocityAt(s1);
+            return (v1 * v1 - v0 * v0) / (2.0 * (s1 - s0));
         }
 
         private Pose2D pointAt(double distance) {
