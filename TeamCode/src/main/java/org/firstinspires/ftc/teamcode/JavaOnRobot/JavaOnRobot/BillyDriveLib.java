@@ -1,6 +1,10 @@
+
 package org.firstinspires.ftc.teamcode.JavaOnRobot.JavaOnRobot;
 
 import com.acmerobotics.dashboard.config.Config;
+import com.acmerobotics.dashboard.FtcDashboard;
+import com.acmerobotics.dashboard.canvas.Canvas;
+import com.acmerobotics.dashboard.telemetry.TelemetryPacket;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
@@ -10,6 +14,7 @@ import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.util.ElapsedTime;
+import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 
@@ -18,7 +23,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * BillyDriveLib v2.1 - integrated motion planning and control library.
+ * BillyDriveLib v2.3 - integrated motion planning and control library.
  *
  * Includes selectable Pinpoint / legacy odometry, composite Pure Pursuit,
  * precomputed curvature- and acceleration-limited velocity profiles, a spatial
@@ -162,7 +167,14 @@ public final class BillyDriveLib {
              * true = goBILDA Pinpoint; false = legacy two-wheel + IMU.
              * Read once when BillyDrive is constructed; restart the OpMode after changing.
              */
-            public static boolean USE_PINPOINT = true;
+            public static boolean USE_PINPOINT = false;
+            /** Enable live reference-vs-actual tracking diagnostics. Safe to toggle from FTC Dashboard. */
+            public static boolean ENABLE_TRACKING_DEBUG = true;
+            /** Field visualization is intentionally independent from ENABLE_TRACKING_DEBUG. */
+            public static boolean ENABLE_FIELD_DASHBOARD = true;
+            public static double FIELD_ROBOT_LENGTH_MM = 430.0;
+            public static double FIELD_ROBOT_WIDTH_MM = 380.0;
+            public static int FIELD_TRAIL_MAX_POINTS = 500;
             /** Pinpoint pod offsets relative to robot center, in millimeters. */
             public static double PINPOINT_X_OFFSET_MM = 0.0;
             public static double PINPOINT_Y_OFFSET_MM = 0.0;
@@ -181,8 +193,8 @@ public final class BillyDriveLib {
             public static RevHubOrientationOnRobot.LogoFacingDirection LOGO_FACING = RevHubOrientationOnRobot.LogoFacingDirection.RIGHT;
             public static RevHubOrientationOnRobot.UsbFacingDirection USB_FACING = RevHubOrientationOnRobot.UsbFacingDirection.UP;
 
-            public static double X_P = 0.0014, X_I = 0, X_D = 0, X_F = 0.00062;
-            public static double Y_P = 0.0014, Y_I = 0, Y_D = 0, Y_F = 0.00062;
+            public static double X_P = 0.0014, X_I = 0, X_D = 0, X_F = 0.0011;
+            public static double Y_P = 0.0014, Y_I = 0, Y_D = 0, Y_F = 0.0016;
             /** Optional acceleration feedforward; keep at 0 until characterized. */
             public static double X_A = 0.0, Y_A = 0.0;
             public static double TURN_P = 0.9, TURN_I = 0, TURN_D = 0.04, TURN_F = 0.045;
@@ -197,7 +209,7 @@ public final class BillyDriveLib {
             public static double PP_LOOKAHEAD_MAX_MM = 320;
             public static double PP_LOOKAHEAD_PER_MM_S = 0.22;
             public static double PP_CORRECTION_GAIN = 2.0;
-            public static double PP_MAX_VELOCITY_MM_S = 450;
+            public static double PP_MAX_VELOCITY_MM_S = 101.3422;
             public static double PP_MAX_ACCEL_MM_S2 = 900;
             public static double PP_MAX_LATERAL_ACCEL_MM_S2 = 1000;
             /** Maximum change of tangential acceleration, mm/s^3. */
@@ -238,10 +250,18 @@ public final class BillyDriveLib {
         private final PIDFController turnController = new PIDFController(0, 0, 0, 0);
         private final ElapsedTime clock = new ElapsedTime();
         private final ElapsedTime modeTimer = new ElapsedTime();
+        private final FtcDashboard dashboard = FtcDashboard.getInstance();
+        private final List<Pose2D> actualTrail = new ArrayList<>();
+        private static final double MM_PER_INCH = 25.4;
+        private double lastTrailX = Double.NaN, lastTrailY = Double.NaN;
 
         private Mode mode = Mode.IDLE;
         private double targetX, targetY, targetHeading;
         private double previousX, previousY, previousHeading, lastTime, currentAngularVelocity;
+        // Tracking diagnostics: reference (planned) state versus measured state, field frame.
+        private double measuredVx, measuredVy;
+        private double debugReferenceX, debugReferenceY;
+        private double debugReferenceVx, debugReferenceVy;
         private double bezierT;
         private BezierCurve path;
         private PurePursuitFollower purePursuit;
@@ -313,9 +333,28 @@ public final class BillyDriveLib {
             double vy = (pose.y - previousY) / dt;
             double angularVelocity = Pose2D.wrap(pose.heading - previousHeading) / dt;
             currentAngularVelocity = angularVelocity;
+            measuredVx = vx;
+            measuredVy = vy;
+            if (ConfigValues.ENABLE_TRACKING_DEBUG && mode != Mode.BEZIER && mode != Mode.AXIS_TUNE) {
+                debugReferenceX = targetX;
+                debugReferenceY = targetY;
+                if (mode == Mode.GO_TO) {
+                    double d = Math.hypot(targetX - pose.x, targetY - pose.y);
+                    double speed = desiredVelocity(d);
+                    debugReferenceVx = d > 1e-6 ? speed * (targetX - pose.x) / d : 0.0;
+                    debugReferenceVy = d > 1e-6 ? speed * (targetY - pose.y) / d : 0.0;
+                } else {
+                    debugReferenceVx = 0.0;
+                    debugReferenceVy = 0.0;
+                }
+            }
             previousX = pose.x;
             previousY = pose.y;
             previousHeading = pose.heading;
+
+            // Field drawing and core pose telemetry are always published when field dashboard is enabled.
+            // This is deliberately NOT gated by ENABLE_TRACKING_DEBUG.
+            publishDashboard(pose);
 
             switch (mode) {
                 case GO_TO:
@@ -481,6 +520,122 @@ public final class BillyDriveLib {
             pinpointPose.y = -pinpoint.getPosY(DistanceUnit.MM);
             pinpointPose.heading = Pose2D.wrap(pinpoint.getHeading(AngleUnit.RADIANS));
         }
+        /**
+         * Publish characterization results after the tuner has applied/saved them in RAM.
+         * Call this from the tuner with its OpMode telemetry object.
+         */
+        public void publishCharacterizationResults(Telemetry telemetry,
+                                                   double xF, double yF,
+                                                   double forwardMaxMmPerSec,
+                                                   double strafeMaxMmPerSec,
+                                                   double recommendedPpMaxMmPerSec) {
+            if (telemetry != null) {
+                telemetry.addLine("BillyDrive - Characterization applied (RAM)");
+                telemetry.addData("X_F", "%.6f", xF);
+                telemetry.addData("Y_F", "%.6f", yF);
+                telemetry.addData("Forward max (mm/s)", "%.2f", forwardMaxMmPerSec);
+                telemetry.addData("Strafe max (mm/s)", "%.2f", strafeMaxMmPerSec);
+                telemetry.addData("Recommended PP max (mm/s)", "%.2f", recommendedPpMaxMmPerSec);
+                telemetry.addLine("Values reset when OpMode restarts unless copied into ConfigValues.");
+                telemetry.update();
+            }
+            TelemetryPacket packet = new TelemetryPacket();
+            packet.put("Characterization/Status", "Applied in RAM");
+            packet.put("Characterization/X_F", xF);
+            packet.put("Characterization/Y_F", yF);
+            packet.put("Characterization/ForwardMax_mm_s", forwardMaxMmPerSec);
+            packet.put("Characterization/StrafeMax_mm_s", strafeMaxMmPerSec);
+            packet.put("Characterization/RecommendedPPMax_mm_s", recommendedPpMaxMmPerSec);
+            dashboard.sendTelemetryPacket(packet);
+        }
+
+        /** Add current pose/path values to a packet and draw planned path, actual trail and robot. */
+        private void publishDashboard(Pose2D pose) {
+            if (!ConfigValues.ENABLE_FIELD_DASHBOARD) return;
+            if (actualTrail.isEmpty() || Math.hypot(pose.x - lastTrailX, pose.y - lastTrailY) >= 8.0) {
+                actualTrail.add(pose.copy());
+                lastTrailX = pose.x;
+                lastTrailY = pose.y;
+                int max = Math.max(20, ConfigValues.FIELD_TRAIL_MAX_POINTS);
+                while (actualTrail.size() > max) actualTrail.remove(0);
+            }
+
+            TelemetryPacket packet = new TelemetryPacket();
+            packet.put("Drive/Mode", mode.toString());
+            packet.put("Robot/X_mm", pose.x);
+            packet.put("Robot/Y_mm", pose.y);
+            packet.put("Robot/Heading_deg", Math.toDegrees(pose.heading));
+            packet.put("Robot/Vx_mm_s", measuredVx);
+            packet.put("Robot/Vy_mm_s", measuredVy);
+            packet.put("Path/TargetX_mm", targetX);
+            packet.put("Path/TargetY_mm", targetY);
+            packet.put("Path/Progress_mm", getPathProgressMm());
+            packet.put("Path/Length_mm", getPathLengthMm());
+            packet.put("Path/Curvature", getPathCurvature());
+            packet.put("Path/Lookahead_mm", getPathLookaheadMm());
+            packet.put("TrackingDebug/Enabled", ConfigValues.ENABLE_TRACKING_DEBUG);
+            if (ConfigValues.ENABLE_TRACKING_DEBUG) {
+                packet.put("TrackingDebug/ReferenceX_mm", debugReferenceX);
+                packet.put("TrackingDebug/ReferenceY_mm", debugReferenceY);
+                packet.put("TrackingDebug/ErrorX_mm", debugReferenceX - pose.x);
+                packet.put("TrackingDebug/ErrorY_mm", debugReferenceY - pose.y);
+                packet.put("TrackingDebug/ReferenceVx_mm_s", debugReferenceVx);
+                packet.put("TrackingDebug/ReferenceVy_mm_s", debugReferenceVy);
+                packet.put("TrackingDebug/VelocityErrorX_mm_s", debugReferenceVx - measuredVx);
+                packet.put("TrackingDebug/VelocityErrorY_mm_s", debugReferenceVy - measuredVy);
+            }
+
+            Canvas c = packet.fieldOverlay();
+            // Planned trajectory: sampled Pure Pursuit path. For point-to-point modes, draw target vector.
+            if (purePursuit != null) purePursuit.drawPath(c);
+            else if (mode == Mode.GO_TO || mode == Mode.HOLD || mode == Mode.AXIS_TUNE) {
+                c.setStroke("#00A6FF");
+                c.setStrokeWidth(2);
+                c.strokeLine(toInches(pose.x), toInches(pose.y), toInches(targetX), toInches(targetY));
+                c.setFill("#00A6FF");
+                c.fillCircle(toInches(targetX), toInches(targetY), 2.5);
+            }
+            // Actual robot trail.
+            c.setStroke("#00D26A");
+            c.setStrokeWidth(2);
+            for (int i = 1; i < actualTrail.size(); i++) {
+                Pose2D a = actualTrail.get(i - 1), b = actualTrail.get(i);
+                c.strokeLine(toInches(a.x), toInches(a.y), toInches(b.x), toInches(b.y));
+            }
+            drawRobot(c, pose);
+            dashboard.sendTelemetryPacket(packet);
+        }
+
+        private static double toInches(double mm) { return mm / MM_PER_INCH; }
+
+        private static void drawRobot(Canvas c, Pose2D pose) {
+            double halfL = toInches(ConfigValues.FIELD_ROBOT_LENGTH_MM) / 2.0;
+            double halfW = toInches(ConfigValues.FIELD_ROBOT_WIDTH_MM) / 2.0;
+            double cos = Math.cos(pose.heading), sin = Math.sin(pose.heading);
+            double[][] corners = {{halfL, halfW}, {halfL, -halfW}, {-halfL, -halfW}, {-halfL, halfW}};
+            double[] x = new double[4], y = new double[4];
+            for (int i = 0; i < 4; i++) {
+                // +X is robot forward, +Y is field right at heading 0.
+                x[i] = toInches(pose.x) + corners[i][0] * cos - corners[i][1] * sin;
+                y[i] = toInches(pose.y) + corners[i][0] * sin + corners[i][1] * cos;
+            }
+            c.setStroke("#FFFFFF");
+            c.setStrokeWidth(2);
+            for (int i = 0; i < 4; i++) c.strokeLine(x[i], y[i], x[(i + 1) % 4], y[(i + 1) % 4]);
+            // Forward direction indicator.
+            c.setStroke("#FF4444");
+            c.setStrokeWidth(3);
+            c.strokeLine(toInches(pose.x), toInches(pose.y),
+                    toInches(pose.x) + halfL * cos, toInches(pose.y) + halfL * sin);
+        }
+
+        /** Clear the accumulated actual-motion trail (does not reset odometry). */
+        public void clearFieldTrail() {
+            actualTrail.clear();
+            lastTrailX = Double.NaN;
+            lastTrailY = Double.NaN;
+        }
+
         public double getTargetX() { return targetX; }
         public double getTargetY() { return targetY; }
         /** Target heading in radians. */
@@ -541,6 +696,29 @@ public final class BillyDriveLib {
         public double getReferenceX() { return referenceX; }
         public double getReferenceY() { return referenceY; }
         public double getReferenceVelocity() { return referenceVelocity; }
+
+        /** True when live tracking diagnostics are enabled in ConfigValues. */
+        public boolean isTrackingDebugEnabled() { return ConfigValues.ENABLE_TRACKING_DEBUG; }
+        /** Planned/reference field X position in mm (PP uses its current lookahead point). */
+        public double getDebugReferenceX() { return debugReferenceX; }
+        /** Planned/reference field Y position in mm (PP uses its current lookahead point). */
+        public double getDebugReferenceY() { return debugReferenceY; }
+        /** Measured field X velocity in mm/s. */
+        public double getDebugMeasuredVx() { return measuredVx; }
+        /** Measured field Y velocity in mm/s. */
+        public double getDebugMeasuredVy() { return measuredVy; }
+        /** Planned field X velocity in mm/s. */
+        public double getDebugReferenceVx() { return debugReferenceVx; }
+        /** Planned field Y velocity in mm/s. */
+        public double getDebugReferenceVy() { return debugReferenceVy; }
+        /** X position error: reference X minus measured X, in mm. */
+        public double getDebugErrorX() { return debugReferenceX - getPose().x; }
+        /** Y position error: reference Y minus measured Y, in mm. */
+        public double getDebugErrorY() { return debugReferenceY - getPose().y; }
+        /** X velocity error: reference Vx minus measured Vx, in mm/s. */
+        public double getDebugVelocityErrorX() { return debugReferenceVx - measuredVx; }
+        /** Y velocity error: reference Vy minus measured Vy, in mm/s. */
+        public double getDebugVelocityErrorY() { return debugReferenceVy - measuredVy; }
 
         /** Low-level robot-centric command: x=right, y=forward, turn=CCW. */
         public void driveRobot(double xPower, double yPower, double turnPower) {
@@ -652,12 +830,20 @@ public final class BillyDriveLib {
                     ConfigValues.PP_MAX_LATERAL_ACCEL_MM_S2);
 
             bezierT = pp.t;
+            if (ConfigValues.ENABLE_TRACKING_DEBUG) {
+                debugReferenceX = pp.lookahead.x;
+                debugReferenceY = pp.lookahead.y;
+            }
             double errorX = pp.lookahead.x - pose.x;
             double errorY = pp.lookahead.y - pose.y;
             double desiredVx = pp.tangentX * pp.velocity
                     + ConfigValues.PP_CORRECTION_GAIN * errorX;
             double desiredVy = pp.tangentY * pp.velocity
                     + ConfigValues.PP_CORRECTION_GAIN * errorY;
+            if (ConfigValues.ENABLE_TRACKING_DEBUG) {
+                debugReferenceVx = pp.tangentX * pp.velocity;
+                debugReferenceVy = pp.tangentY * pp.velocity;
+            }
 
             // Tangential + centripetal acceleration reference in field coordinates.
             double normalAccel = pp.velocity * pp.velocity * pp.curvature;
@@ -746,6 +932,12 @@ public final class BillyDriveLib {
             referenceX = pathStartX + pathUnitX * profile[0];
             referenceY = pathStartY + pathUnitY * profile[0];
             referenceVelocity = profile[1];
+            if (ConfigValues.ENABLE_TRACKING_DEBUG) {
+                debugReferenceX = referenceX;
+                debugReferenceY = referenceY;
+                debugReferenceVx = pathUnitX * referenceVelocity;
+                debugReferenceVy = pathUnitY * referenceVelocity;
+            }
             double ex = referenceX - p.x, ey = referenceY - p.y;
             boolean profileDone = profile[0] >= pathLength - 1e-3 && profile[1] <= 1e-3;
             if (profileDone && Math.hypot(targetX - p.x, targetY - p.y) <= tuneToleranceMm
@@ -1603,6 +1795,19 @@ public final class BillyDriveLib {
             return lo;
         }
 
+        /** Draw the sampled planned trajectory on FTC Dashboard field overlay. Coordinates are inches. */
+        private void drawPath(Canvas canvas) {
+            if (count < 2) return;
+            canvas.setStroke("#00A6FF");
+            canvas.setStrokeWidth(2);
+            for (int i = 1; i < count; i++) {
+                canvas.strokeLine(xs[i - 1] / 25.4, ys[i - 1] / 25.4,
+                        xs[i] / 25.4, ys[i] / 25.4);
+            }
+            canvas.setFill("#00A6FF");
+            canvas.fillCircle(xs[count - 1] / 25.4, ys[count - 1] / 25.4, 2.5);
+        }
+
         public double getProgressMm() { return progressS; }
         public double getPathLengthMm() { return pathLength; }
         public double getCurvature() { return currentCurvature; }
@@ -1720,3 +1925,4 @@ public final class BillyDriveLib {
         }
     }
 }
+
